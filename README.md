@@ -55,10 +55,23 @@ Search for an existing answer:
 3sat search problem.cnf
 ```
 
+Check the configured API, RPC, contracts, tokens, and optional wallet balances:
+
+```bash
+3sat doctor --address 0xYourWallet
+3sat tokens --onchain
+```
+
 Create a bounty. The command prepares and uploads the instance/metadata first. It broadcasts only when `--send` is provided:
 
 ```bash
 3sat issue problem.cnf --reward 100 --token USDC --send
+```
+
+Run a true local dry run without uploading files:
+
+```bash
+3sat issue problem.cnf --reward 100 --token USDC --dry-run
 ```
 
 Buy answer access:
@@ -84,14 +97,65 @@ Download a matched bundle rebuilt for the CNF you searched:
 - `3sat config show`
 - `3sat config init`
 - `3sat config set KEY VALUE`
+- `3sat doctor`
+- `3sat tokens`
 - `3sat standardize problem.cnf`
 - `3sat search problem.cnf`
 - `3sat marketplace`
 - `3sat bounty SAT-...`
+- `3sat issue problem.cnf --reward 100 --token USDC --dry-run`
 - `3sat issue problem.cnf --reward 100 --token USDC --send`
 - `3sat buy-answer SAT-... --send`
 - `3sat download-answer SAT-... --cnf query.cnf`
 - `3sat balance --address 0x...`
+- `3sat upload-solution answer.cnf --kind sat`
+- `3sat upload-solution proof.frat --kind unsat --proof-format frat`
+- `3sat prepare-commit SAT-... --solver 0x... --solution-ref r2://... --solution-digest 0x... -o reveal.json`
+- `3sat commit SAT-... --solution-ref r2://... --solution-digest 0x... --private-key 0x... --send -o reveal.json`
+- `3sat reveal --bundle reveal.json --submission-id 1 --private-key 0x... --send`
+
+## Solver flow for advanced users
+
+The fully automated solver clients are still the easiest way to solve bounties. Advanced users can also use the CLI.
+
+Upload a SAT answer:
+
+```bash
+3sat upload-solution answer.cnf --kind sat
+```
+
+Upload an UNSAT proof:
+
+```bash
+3sat upload-solution unsat-proof.frat --kind unsat --proof-format frat
+```
+
+Prepare a commit without broadcasting:
+
+```bash
+3sat prepare-commit SAT-XXXX-XXXX-XXXX \
+  --solver 0xSolverWallet \
+  --solution-ref r2://... \
+  --solution-digest 0x... \
+  -o reveal.json
+```
+
+Broadcast a commit:
+
+```bash
+3sat commit SAT-XXXX-XXXX-XXXX \
+  --solution-ref r2://... \
+  --solution-digest 0x... \
+  --private-key 0x... \
+  --send \
+  -o reveal.json
+```
+
+Reveal after commit. Use the submission id assigned by the commit transaction:
+
+```bash
+3sat reveal --bundle reveal.json --submission-id 1 --private-key 0x... --send
+```
 
 ## Configuration
 
@@ -118,4 +182,3 @@ Supported environment variable overrides:
 The CLI uses the public 3SAT API for artifact storage, search, metadata generation, and transaction preparation. Wallet signing and transaction broadcasting happen locally on the user's machine.
 
 The solver and verifier automation clients remain separate because they bundle SAT solvers, proof checkers, and long-running polling loops.
-

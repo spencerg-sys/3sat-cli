@@ -92,6 +92,31 @@ ARTIFACT_ACCESS_ABI = [
 ]
 
 
+BOUNTY_MANAGER_ABI = [
+    {
+        "type": "function",
+        "name": "verifierRewardPoolFor",
+        "stateMutability": "view",
+        "inputs": [{"name": "reward", "type": "uint256"}],
+        "outputs": [{"name": "", "type": "uint256"}],
+    },
+    {
+        "type": "function",
+        "name": "verifierRewardBps",
+        "stateMutability": "view",
+        "inputs": [],
+        "outputs": [{"name": "", "type": "uint16"}],
+    },
+    {
+        "type": "function",
+        "name": "solverBondForToken",
+        "stateMutability": "view",
+        "inputs": [{"name": "paymentToken", "type": "address"}],
+        "outputs": [{"name": "", "type": "uint256"}],
+    },
+]
+
+
 class ChainClient:
     def __init__(self, rpc_url: str, expected_chain_id: int | None = None) -> None:
         self.w3 = Web3(Web3.HTTPProvider(rpc_url, request_kwargs={"timeout": 60}))
@@ -110,6 +135,12 @@ class ChainClient:
 
     def artifact_access_contract(self, address: str):
         return self.w3.eth.contract(address=self.w3.to_checksum_address(address), abi=ARTIFACT_ACCESS_ABI)
+
+    def bounty_manager_contract(self, address: str):
+        return self.w3.eth.contract(address=self.w3.to_checksum_address(address), abi=BOUNTY_MANAGER_ABI)
+
+    def contract_code_size(self, address: str) -> int:
+        return len(self.w3.eth.get_code(self.w3.to_checksum_address(address)))
 
     def token_info(self, address: str) -> dict[str, Any]:
         contract = self.token_contract(address)
@@ -156,6 +187,19 @@ class ChainClient:
             self.w3.to_checksum_address(payment_token),
         ).call()
         return int(price), solver, int(solver_amount), int(routed_amount)
+
+    def verifier_reward_pool_for(self, bounty_manager: str, reward: int) -> int:
+        return int(self.bounty_manager_contract(bounty_manager).functions.verifierRewardPoolFor(int(reward)).call())
+
+    def verifier_reward_bps(self, bounty_manager: str) -> int:
+        return int(self.bounty_manager_contract(bounty_manager).functions.verifierRewardBps().call())
+
+    def solver_bond_for_token(self, bounty_manager: str, payment_token: str) -> int:
+        return int(
+            self.bounty_manager_contract(bounty_manager)
+            .functions.solverBondForToken(self.w3.to_checksum_address(payment_token))
+            .call()
+        )
 
     def send_prepared_transaction(self, tx: dict[str, Any], private_key: str) -> dict[str, Any]:
         return self.send_transaction(
@@ -266,4 +310,3 @@ def sign_access_message(private_key: str, *, chain_id: int, bounty_manager: str,
     )
     signed = Account.sign_message(encode_defunct(text=message), private_key)
     return {"wallet": account.address, "timestamp": timestamp, "signature": signed.signature.hex(), "message": message}
-

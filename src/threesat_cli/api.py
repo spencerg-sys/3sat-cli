@@ -115,6 +115,12 @@ class ProtocolApi:
     def prepare_create_bounty(self, payload: dict[str, Any]) -> Any:
         return self.post("/api/protocol/sdk/issuer/prepare-create-bounty", payload)
 
+    def prepare_commit(self, payload: dict[str, Any]) -> Any:
+        return self.post("/api/protocol/sdk/solver/prepare-commit", payload)
+
+    def prepare_reveal(self, payload: dict[str, Any]) -> Any:
+        return self.post("/api/protocol/sdk/solver/prepare-reveal", payload)
+
     @staticmethod
     def _decode(response: requests.Response) -> Any:
         body = response.text
