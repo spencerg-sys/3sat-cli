@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "3sat"
+version = "0.1.0"
+description = "Command line client for the 3SAT protocol."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [
+  { name = "3SAT Lab" }
+]
+keywords = ["3sat", "sat", "web3", "cnf", "bounty"]
+dependencies = [
+  "requests>=2.31.0",
+  "web3>=6.20.0,<8",
+  "eth-account>=0.10.0"
+]
+
+[project.scripts]
+3sat = "threesat_cli.main:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
