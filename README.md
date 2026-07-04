@@ -1,6 +1,6 @@
 # 3SAT CLI
 
-Command line client for the 3SAT protocol.
+Official command line client for the 3SAT protocol.
 
 The package installs a `3sat` command for users who want to search the answer database, create bounties, buy answer access, and download answer bundles without using the web UI.
 
@@ -13,17 +13,15 @@ The package installs a `3sat` command for users who want to search the answer da
 
 ## Install
 
-For local development:
-
-```bash
-cd 3sat_CLI
-python -m pip install -e .
-```
-
-After publishing to PyPI, the intended install command is:
-
 ```bash
 pip install 3sat
+```
+
+Verify the installation:
+
+```bash
+3sat --help
+3sat doctor
 ```
 
 ## Security
@@ -192,3 +190,13 @@ Supported environment variable overrides:
 The CLI uses the public 3SAT API for artifact storage, search, metadata generation, and transaction preparation. Wallet signing and transaction broadcasting happen locally on the user's machine.
 
 The solver and verifier automation clients remain separate because they bundle SAT solvers, proof checkers, and long-running polling loops.
+
+## Development
+
+Install from source when contributing to the CLI:
+
+```bash
+git clone https://github.com/spencerg-sys/3sat-cli.git
+cd 3sat-cli
+python -m pip install -e .
+```
