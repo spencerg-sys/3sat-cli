@@ -4,6 +4,13 @@ Command line client for the 3SAT protocol.
 
 The package installs a `3sat` command for users who want to search the answer database, create bounties, buy answer access, and download answer bundles without using the web UI.
 
+## Links
+
+- Website: https://3sat.network/
+- Web app: https://3sat.network/app
+- Protocol docs: https://3sat.network/docs/api
+- SAT Academy: https://3sat.network/docs/academy
+
 ## Install
 
 For local development:

@@ -22,5 +22,11 @@ dependencies = [
 [project.scripts]
 3sat = "threesat_cli.main:main"
 
+[project.urls]
+Homepage = "https://3sat.network/"
+Documentation = "https://3sat.network/docs/api"
+Application = "https://3sat.network/app"
+Source = "https://github.com/spencerg-sys/3sat-cli"
+
 [tool.setuptools.packages.find]
 where = ["src"]
