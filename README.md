@@ -101,7 +101,8 @@ Download a matched bundle rebuilt for the CNF you searched:
 - `3sat tokens`
 - `3sat standardize problem.cnf`
 - `3sat search problem.cnf`
-- `3sat marketplace`
+- `3sat marketplace` (shows 20 bounties by default)
+- `3sat marketplace --offset 20` (load the next page)
 - `3sat bounty SAT-...`
 - `3sat issue problem.cnf --reward 100 --token USDC --dry-run`
 - `3sat issue problem.cnf --reward 100 --token USDC --send`
@@ -117,6 +118,8 @@ Download a matched bundle rebuilt for the CNF you searched:
 ## Solver flow for advanced users
 
 The fully automated solver clients are still the easiest way to solve bounties. Advanced users can also use the CLI.
+
+Issuer task descriptions are limited to 200 characters. This keeps public metadata concise and prevents oversized bounty descriptions from being used as an abuse vector.
 
 Upload a SAT answer:
 

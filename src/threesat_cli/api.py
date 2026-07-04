@@ -106,8 +106,15 @@ class ProtocolApi:
     def bounty(self, bounty_id_or_code: str) -> Any:
         return self.get(f"/api/protocol/sdk/bounties/{quote(bounty_id_or_code)}")
 
-    def marketplace(self, sync: bool = False) -> Any:
-        return self.get("/api/protocol/marketplace", params={"sync": "1"} if sync else None)
+    def marketplace(self, sync: bool = False, limit: int | None = None, offset: int | None = None) -> Any:
+        params: dict[str, str] = {}
+        if sync:
+            params["sync"] = "1"
+        if limit is not None:
+            params["limit"] = str(limit)
+        if offset is not None:
+            params["offset"] = str(offset)
+        return self.get("/api/protocol/marketplace", params=params or None)
 
     def build_metadata(self, payload: dict[str, Any]) -> Any:
         return self.post("/api/protocol/sdk/issuer/build-metadata", payload)

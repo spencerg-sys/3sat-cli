@@ -142,18 +142,26 @@ def command_search(args: argparse.Namespace) -> None:
 
 def command_marketplace(args: argparse.Namespace) -> None:
     api = make_api(load_config())
-    result = api.marketplace(sync=args.sync)
+    limit = max(1, args.limit)
+    offset = max(0, args.offset)
+    result = api.marketplace(sync=args.sync, limit=limit, offset=offset)
     if maybe_json(args, result):
         return
     status = result.get("status", {})
     bounties = result.get("bounties") or []
-    print(f"Marketplace: {len(bounties)} bounties")
+    pagination = result.get("pagination") or {}
+    total = pagination.get("total", status.get("cachedBounties", "?"))
+    shown_bounties = bounties if pagination else bounties[offset : offset + limit]
+    print(f"Marketplace: {total} cached bounties")
+    print(f"Showing {len(shown_bounties)} bounties")
     print(f"Indexer storage: {status.get('storage')} / last block {status.get('lastIndexedBlock')}")
-    for bounty in bounties[: args.limit]:
+    for bounty in shown_bounties:
         reward = bounty.get("reward", "-")
         code = bounty.get("bountyCode") or bounty.get("bountyId")
         state = bounty.get("status") or bounty.get("statusLabel") or ("finalized" if bounty.get("finalized") else "open")
         print(f"- {code}: reward {reward}, {state}")
+    if pagination.get("hasMore") or (not pagination and offset + len(shown_bounties) < len(bounties)):
+        print(f"More bounties available. Use --offset {offset + len(shown_bounties)} to load the next page.")
 
 
 def command_bounty(args: argparse.Namespace) -> None:
@@ -244,7 +252,8 @@ def command_doctor(args: argparse.Namespace) -> None:
 
     try:
         marketplace = api.marketplace(sync=False)
-        print_check("Marketplace API", True, f"{len(marketplace.get('bounties') or [])} cached bounties")
+        status = marketplace.get("status") or {}
+        print_check("Marketplace API", True, f"{status.get('cachedBounties', len(marketplace.get('bounties') or []))} cached bounties")
     except Exception as exc:
         print_check("Marketplace API", False, str(exc))
         failures += 1
@@ -316,6 +325,8 @@ def command_issue(args: argparse.Namespace) -> None:
     config = load_config()
     api = make_api(config)
     token = token_by_symbol(config, args.token)
+    if len(args.description or "") > 200:
+        raise SystemExit("Task description must be 200 characters or fewer.")
     instance_path = Path(args.cnf)
     if not instance_path.exists():
         raise RuntimeError(f"CNF file not found: {instance_path}")
@@ -762,7 +773,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     marketplace = sub.add_parser("marketplace", help="List indexed bounties.")
     marketplace.add_argument("--sync", action="store_true", help="Ask the API to sync before returning.")
-    marketplace.add_argument("--limit", type=int, default=20)
+    marketplace.add_argument("--limit", type=int, default=20, help="Number of bounties to show. Default: 20.")
+    marketplace.add_argument("--offset", type=int, default=0, help="Pagination offset for loading the next page.")
     marketplace.add_argument("--json", action="store_true")
     marketplace.set_defaults(func=command_marketplace)
 
@@ -792,7 +804,7 @@ def build_parser() -> argparse.ArgumentParser:
     issue.add_argument("--reward", required=True, help="Human token amount, e.g. 100 or 0.5.")
     issue.add_argument("--token", default="USDC", choices=["USDC", "3SAT"], help="Bounty payment asset.")
     issue.add_argument("--title", default="SAT Bounty")
-    issue.add_argument("--description", default="")
+    issue.add_argument("--description", default="", help="Public task description. Maximum 200 characters.")
     issue.add_argument("--posting-fee", default="0")
     issue.add_argument("--open-hours", type=float, default=24)
     issue.add_argument("--reveal-hours", type=float, default=2)
