@@ -73,6 +73,8 @@ Create a bounty. The command prepares and uploads the instance/metadata first. I
 3sat issue problem.cnf --reward 100 --token USDC --send
 ```
 
+The default open, reveal, and verification windows are 1 hour each. Every window must be at least 1 hour, and verifier quorum must be between 1 and 100.
+
 Run a true local dry run without uploading files:
 
 ```bash
@@ -158,6 +160,10 @@ Broadcast a commit:
   --send \
   -o reveal.json
 ```
+
+Before preparing or sending a commit, the CLI verifies the bounty's snapshotted solver bond directly on chain and rebuilds the approval with that value. The current legacy Arbitrum Sepolia BountyManager (`0x942b...C767`) predates bond snapshots, so only that exact contract on chain `421614` temporarily uses its on-chain token-level bond configuration. New deployments never use this fallback, and a snapshot value of zero is rejected.
+
+The current legacy Arbitrum Sepolia AccessController (`0x6cBC...effB`) predates protected price quotes and manager epochs. The CLI preserves downloads for wallets that already have access, but deliberately disables new paid purchases on that exact legacy deployment until the migrated AccessController is live.
 
 Reveal after commit. Use the submission id assigned by the commit transaction:
 

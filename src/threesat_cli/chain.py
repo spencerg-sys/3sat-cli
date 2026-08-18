@@ -9,6 +9,15 @@ from web3 import Web3
 
 
 SOLUTION_ARTIFACT_TYPE = 2
+ACCESS_STATUS_UNCONFIGURED = 0
+ACCESS_STATUS_PUBLIC = 1
+ACCESS_STATUS_PRICED = 2
+ACCESS_STATUS_DISABLED = 3
+ACCESS_PURCHASE_DEADLINE_SECONDS = 30 * 60
+LEGACY_SOLVER_BOND_CHAIN_ID = 421614
+LEGACY_SOLVER_BOND_BOUNTY_MANAGER = "0x942b326b190d588fe1bb3931502f509c9f9ec767"
+LEGACY_ACCESS_CONTROLLER_CHAIN_ID = 421614
+LEGACY_ARTIFACT_ACCESS_CONTROLLER = "0x6cbcbddcbe1c4c51237526c152650a4cb4f5effb"
 
 
 ERC20_ABI = [
@@ -53,6 +62,21 @@ ERC20_ABI = [
 ARTIFACT_ACCESS_ABI = [
     {
         "type": "function",
+        "name": "accessQuoteWithEpoch",
+        "stateMutability": "view",
+        "inputs": [
+            {"name": "bountyId", "type": "uint256"},
+            {"name": "artifactType", "type": "uint8"},
+            {"name": "paymentToken", "type": "address"},
+        ],
+        "outputs": [
+            {"name": "epoch", "type": "uint256"},
+            {"name": "status", "type": "uint8"},
+            {"name": "price", "type": "uint256"},
+        ],
+    },
+    {
+        "type": "function",
         "name": "accessDistribution",
         "stateMutability": "view",
         "inputs": [
@@ -86,6 +110,9 @@ ARTIFACT_ACCESS_ABI = [
             {"name": "bountyId", "type": "uint256"},
             {"name": "artifactType", "type": "uint8"},
             {"name": "paymentToken", "type": "address"},
+            {"name": "maxPrice", "type": "uint256"},
+            {"name": "deadline", "type": "uint256"},
+            {"name": "expectedManagerEpoch", "type": "uint256"},
         ],
         "outputs": [],
     },
@@ -113,6 +140,13 @@ BOUNTY_MANAGER_ABI = [
         "stateMutability": "view",
         "inputs": [{"name": "paymentToken", "type": "address"}],
         "outputs": [{"name": "", "type": "uint256"}],
+    },
+    {
+        "type": "function",
+        "name": "bountySolverBond",
+        "stateMutability": "view",
+        "inputs": [{"name": "bountyId", "type": "uint256"}],
+        "outputs": [{"name": "bondAmount", "type": "uint256"}],
     },
 ]
 
@@ -188,6 +222,15 @@ class ChainClient:
         ).call()
         return int(price), solver, int(solver_amount), int(routed_amount)
 
+    def access_quote(self, controller: str, bounty_id: str | int, payment_token: str) -> tuple[int, int, int]:
+        contract = self.artifact_access_contract(controller)
+        epoch, status, price = contract.functions.accessQuoteWithEpoch(
+            int(bounty_id),
+            SOLUTION_ARTIFACT_TYPE,
+            self.w3.to_checksum_address(payment_token),
+        ).call()
+        return int(epoch), int(status), int(price)
+
     def verifier_reward_pool_for(self, bounty_manager: str, reward: int) -> int:
         return int(self.bounty_manager_contract(bounty_manager).functions.verifierRewardPoolFor(int(reward)).call())
 
@@ -200,6 +243,19 @@ class ChainClient:
             .functions.solverBondForToken(self.w3.to_checksum_address(payment_token))
             .call()
         )
+
+    def bounty_solver_bond(self, bounty_manager: str, bounty_id: str | int) -> int:
+        return int(
+            self.bounty_manager_contract(bounty_manager)
+            .functions.bountySolverBond(int(bounty_id))
+            .call()
+        )
+
+    def approval_data(self, token: str, spender: str, amount: int) -> str:
+        return self.token_contract(token).functions.approve(
+            self.w3.to_checksum_address(spender),
+            int(amount),
+        )._encode_transaction_data()
 
     def send_prepared_transaction(self, tx: dict[str, Any], private_key: str) -> dict[str, Any]:
         return self.send_transaction(
@@ -217,13 +273,26 @@ class ChainClient:
         tx = fn.build_transaction({"from": account.address, "value": 0})
         return self.send_built_transaction(tx, private_key, "approve")
 
-    def purchase_access(self, controller: str, bounty_id: str | int, payment_token: str, private_key: str) -> dict[str, Any]:
+    def purchase_access(
+        self,
+        controller: str,
+        bounty_id: str | int,
+        payment_token: str,
+        max_price: int,
+        expected_manager_epoch: int,
+        private_key: str,
+    ) -> dict[str, Any]:
         contract = self.artifact_access_contract(controller)
         account = self.account(private_key)
+        latest_block = self.w3.eth.get_block("latest")
+        deadline = int(latest_block["timestamp"]) + ACCESS_PURCHASE_DEADLINE_SECONDS
         fn = contract.functions.purchaseAccess(
             int(bounty_id),
             SOLUTION_ARTIFACT_TYPE,
             self.w3.to_checksum_address(payment_token),
+            int(max_price),
+            deadline,
+            int(expected_manager_epoch),
         )
         tx = fn.build_transaction({"from": account.address, "value": 0})
         return self.send_built_transaction(tx, private_key, "purchaseAccess")

@@ -9,7 +9,18 @@ from typing import Any
 from eth_account import Account
 
 from .api import ProtocolApi
-from .chain import ChainClient, SOLUTION_ARTIFACT_TYPE, sign_access_message
+from .chain import (
+    ACCESS_STATUS_DISABLED,
+    ACCESS_STATUS_PRICED,
+    ACCESS_STATUS_PUBLIC,
+    ACCESS_STATUS_UNCONFIGURED,
+    ChainClient,
+    LEGACY_ACCESS_CONTROLLER_CHAIN_ID,
+    LEGACY_ARTIFACT_ACCESS_CONTROLLER,
+    LEGACY_SOLVER_BOND_BOUNTY_MANAGER,
+    LEGACY_SOLVER_BOND_CHAIN_ID,
+    sign_access_message,
+)
 from .config import (
     CONFIG_PATH,
     init_config,
@@ -34,6 +45,10 @@ from .formatting import (
     validate_dimacs_cnf,
     write_bytes,
 )
+
+MINIMUM_BOUNTY_WINDOW_HOURS = 1
+MINIMUM_BOUNTY_WINDOW_SECONDS = MINIMUM_BOUNTY_WINDOW_HOURS * 60 * 60
+MAXIMUM_VERIFIER_QUORUM = 100
 
 
 def make_api(config: dict[str, Any]) -> ProtocolApi:
@@ -336,10 +351,10 @@ def command_issue(args: argparse.Namespace) -> None:
     commit_seconds = int(round(float(args.open_hours) * 3600))
     reveal_seconds = int(round(float(args.reveal_hours) * 3600))
     verify_seconds = int(round(float(args.verify_hours) * 3600))
-    if commit_seconds <= 0 or reveal_seconds <= 0 or verify_seconds <= 0:
-        raise RuntimeError("All timing windows must be greater than zero.")
-    if args.quorum <= 0:
-        raise RuntimeError("Verifier quorum must be greater than zero.")
+    if min(commit_seconds, reveal_seconds, verify_seconds) < MINIMUM_BOUNTY_WINDOW_SECONDS:
+        raise RuntimeError(f"All timing windows must be at least {MINIMUM_BOUNTY_WINDOW_HOURS} hours.")
+    if args.quorum <= 0 or args.quorum > MAXIMUM_VERIFIER_QUORUM:
+        raise RuntimeError(f"Verifier quorum must be between 1 and {MAXIMUM_VERIFIER_QUORUM}.")
 
     reward_raw = parse_token_amount(args.reward, int(token["decimals"]))
     posting_fee_raw = 0 if str(args.posting_fee).strip() in {"", "0"} else parse_token_amount(args.posting_fee, int(token["decimals"]))
@@ -559,10 +574,56 @@ def _print_commit_preview(prepared: dict[str, Any], config: dict[str, Any]) -> N
     print_prepared_transactions(prepared["transactions"])
 
 
+def _synchronize_commit_bond(prepared: dict[str, Any], config: dict[str, Any]) -> ChainClient:
+    chain = make_chain(config)
+    bounty_manager = str(prepared.get("bountyManager") or config["bounty_manager"])
+    bounty_id = prepared["bountyId"]
+    bond_token = str(prepared["bondToken"])
+    solver_bond_source = "bounty-snapshot"
+    try:
+        solver_bond = chain.bounty_solver_bond(bounty_manager, bounty_id)
+    except Exception as snapshot_error:
+        legacy_fallback_allowed = (
+            chain.chain_id == LEGACY_SOLVER_BOND_CHAIN_ID
+            and bounty_manager.lower() == LEGACY_SOLVER_BOND_BOUNTY_MANAGER
+        )
+        if not legacy_fallback_allowed:
+            raise RuntimeError("Could not read the bounty's snapshotted solver bond.") from snapshot_error
+
+        api_bond_source = prepared.get("solverBondSource")
+        if api_bond_source not in {None, "legacy-token-config"}:
+            raise RuntimeError(
+                "The API solver bond source does not match the configured legacy Arbitrum Sepolia manager."
+            ) from snapshot_error
+
+        # This exact Arbitrum Sepolia deployment predates per-bounty snapshots.
+        # Its token-level value remains the authoritative on-chain source until
+        # the audited BountyManager is deployed; no other manager may use it.
+        solver_bond = chain.solver_bond_for_token(bounty_manager, bond_token)
+        solver_bond_source = "legacy-token-config"
+
+    if solver_bond <= 0:
+        if solver_bond_source == "bounty-snapshot":
+            raise RuntimeError("The bounty does not have a valid snapshotted solver bond.")
+        raise RuntimeError("The legacy token configuration does not have a valid solver bond.")
+
+    prepared["solverBond"] = str(solver_bond)
+    prepared["solverBondSource"] = solver_bond_source
+    for transaction in prepared.get("transactions", []):
+        if transaction.get("functionName") != "approve":
+            continue
+        transaction["to"] = bond_token
+        transaction["args"] = [bounty_manager, str(solver_bond)]
+        transaction["data"] = chain.approval_data(bond_token, bounty_manager, solver_bond)
+        transaction["value"] = "0"
+    return chain
+
+
 def command_prepare_commit(args: argparse.Namespace) -> None:
     config = load_config()
     api = make_api(config)
     prepared = api.prepare_commit(_prepare_commit_payload(args, config))
+    _synchronize_commit_bond(prepared, config)
     if args.output:
         Path(args.output).write_text(json.dumps(prepared["revealBundle"], indent=2) + "\n", encoding="utf-8")
     if maybe_json(args, prepared):
@@ -576,6 +637,7 @@ def command_commit(args: argparse.Namespace) -> None:
     config = load_config()
     api = make_api(config)
     prepared = api.prepare_commit(_prepare_commit_payload(args, config))
+    chain = _synchronize_commit_bond(prepared, config)
     if args.output:
         Path(args.output).write_text(json.dumps(prepared["revealBundle"], indent=2) + "\n", encoding="utf-8")
     if maybe_json(args, prepared):
@@ -587,7 +649,6 @@ def command_commit(args: argparse.Namespace) -> None:
         print("\nNot broadcast. Add --send to approve the solver bond and commit.")
         return
     key = require_private_key(args)
-    chain = make_chain(config)
     for tx in prepared["transactions"]:
         print(f"Sending {tx['label']}...")
         receipt = chain.send_prepared_transaction(tx, key)
@@ -679,11 +740,41 @@ def command_buy_answer(args: argparse.Namespace) -> None:
 
     issuer_access = account.address.lower() == bounty["issuer"].lower()
     has_access = issuer_access or chain.can_access(controller, account.address, bounty_id)
-    price, solver, solver_amount, routed_amount = chain.access_distribution(controller, bounty_id, payment_token)
+
+    is_legacy_access_controller = (
+        chain.chain_id == LEGACY_ACCESS_CONTROLLER_CHAIN_ID
+        and controller.lower() == LEGACY_ARTIFACT_ACCESS_CONTROLLER
+    )
+    if is_legacy_access_controller:
+        print(f"Bounty: {bounty_result['bountyCode']} ({bounty_id})")
+        print(f"Wallet: {account.address}")
+        if issuer_access:
+            print("Issuer access detected. No purchase required.")
+        elif has_access:
+            print("This wallet already has answer access. No purchase required.")
+        else:
+            raise RuntimeError(
+                "Paid answer purchases are disabled on the legacy Arbitrum Sepolia "
+                "AccessController until the protected quote/epoch contract migration is complete."
+            )
+        if args.download:
+            args.bounty = bounty_id
+            command_download_answer(args)
+        return
+
+    quote_epoch, quote_status, price = chain.access_quote(controller, bounty_id, payment_token)
+    _, solver, solver_amount, routed_amount = chain.access_distribution(controller, bounty_id, payment_token)
 
     print(f"Bounty: {bounty_result['bountyCode']} ({bounty_id})")
     print(f"Wallet: {account.address}")
-    print(f"Access price: {format_token_amount(price, int(token['decimals']), token['symbol'])}")
+    if quote_status == ACCESS_STATUS_PUBLIC:
+        print("Access price: Public")
+    elif quote_status == ACCESS_STATUS_DISABLED:
+        print("Access price: Payment token disabled")
+    elif quote_status == ACCESS_STATUS_UNCONFIGURED:
+        print("Access price: Not configured")
+    else:
+        print(f"Access price: {format_token_amount(price, int(token['decimals']), token['symbol'])}")
     print(f"Solver share: {format_token_amount(solver_amount, int(token['decimals']), token['symbol'])} -> {short_address(solver)}")
     print(f"Routed amount: {format_token_amount(routed_amount, int(token['decimals']), token['symbol'])}")
     if issuer_access:
@@ -691,6 +782,12 @@ def command_buy_answer(args: argparse.Namespace) -> None:
     elif has_access:
         print("This wallet already has answer access. No purchase required.")
     else:
+        if quote_status == ACCESS_STATUS_DISABLED:
+            raise RuntimeError("Answer access purchases are disabled for this payment token.")
+        if quote_status == ACCESS_STATUS_UNCONFIGURED:
+            raise RuntimeError("Answer access pricing is not configured for this payment token.")
+        if quote_status != ACCESS_STATUS_PRICED:
+            raise RuntimeError(f"Unsupported answer access quote status: {quote_status}.")
         allowance = chain.allowance(payment_token, account.address, controller)
         balance = chain.token_balance(payment_token, account.address)
         print(f"Balance: {format_token_amount(balance, int(token['decimals']), token['symbol'])}")
@@ -707,7 +804,7 @@ def command_buy_answer(args: argparse.Namespace) -> None:
             if receipt["status"] != 1:
                 raise RuntimeError("Approval reverted.")
         print("Purchasing answer access...")
-        receipt = chain.purchase_access(controller, bounty_id, payment_token, key)
+        receipt = chain.purchase_access(controller, bounty_id, payment_token, price, quote_epoch, key)
         print(f"  tx {receipt['hash']} status={receipt['status']} gas={receipt['gasUsed']}")
         if receipt["status"] != 1:
             raise RuntimeError("Purchase reverted.")
@@ -806,9 +903,9 @@ def build_parser() -> argparse.ArgumentParser:
     issue.add_argument("--title", default="SAT Bounty")
     issue.add_argument("--description", default="", help="Public task description. Maximum 200 characters.")
     issue.add_argument("--posting-fee", default="0")
-    issue.add_argument("--open-hours", type=float, default=24)
-    issue.add_argument("--reveal-hours", type=float, default=2)
-    issue.add_argument("--verify-hours", type=float, default=24)
+    issue.add_argument("--open-hours", type=float, default=MINIMUM_BOUNTY_WINDOW_HOURS)
+    issue.add_argument("--reveal-hours", type=float, default=MINIMUM_BOUNTY_WINDOW_HOURS)
+    issue.add_argument("--verify-hours", type=float, default=MINIMUM_BOUNTY_WINDOW_HOURS)
     issue.add_argument("--quorum", type=int, default=1)
     issue.add_argument("--dry-run", action="store_true", help="Only validate local CNF/params and print preview; upload nothing.")
     issue.add_argument("--send", action="store_true", help="Broadcast the approve and create-bounty transactions.")
