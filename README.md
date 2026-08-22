@@ -140,6 +140,8 @@ Upload an UNSAT proof:
 3sat upload-solution unsat-proof.frat --kind unsat --proof-format frat
 ```
 
+UNSAT proof uploads are limited to 100 MiB.
+
 Prepare a commit without broadcasting:
 
 ```bash

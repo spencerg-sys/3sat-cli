@@ -49,6 +49,7 @@ from .formatting import (
 MINIMUM_BOUNTY_WINDOW_HOURS = 1
 MINIMUM_BOUNTY_WINDOW_SECONDS = MINIMUM_BOUNTY_WINDOW_HOURS * 60 * 60
 MAXIMUM_VERIFIER_QUORUM = 100
+MAXIMUM_PROOF_UPLOAD_BYTES = 100 * 1024 * 1024
 
 
 def make_api(config: dict[str, Any]) -> ProtocolApi:
@@ -524,6 +525,8 @@ def command_upload_solution(args: argparse.Namespace) -> None:
         raise RuntimeError(f"Solution file not found: {solution_path}")
     solution_kind = normalize_solution_kind(args.kind)
     proof_format = normalize_proof_format(args.proof_format, solution_kind)
+    if solution_kind == 2 and solution_path.stat().st_size > MAXIMUM_PROOF_UPLOAD_BYTES:
+        raise RuntimeError("UNSAT proof files must be 100 MiB or smaller.")
     result = api.upload_file(
         "solution",
         solution_path,

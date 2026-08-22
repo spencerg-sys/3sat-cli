@@ -86,8 +86,6 @@ def validate_dimacs_cnf(text: str) -> dict[str, Any]:
             except ValueError as exc:
                 raise ValueError(f"Line {line_number}: invalid DIMACS token {token!r}") from exc
             if literal == 0:
-                if not current:
-                    raise ValueError(f"Line {line_number}: empty clauses are not accepted by this CLI check.")
                 clauses.append(current)
                 current = []
                 continue
