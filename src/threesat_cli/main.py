@@ -1,14 +1,20 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import secrets
 import sys
+import time
+import uuid
 from pathlib import Path
 from typing import Any
 
+from Crypto.Hash import keccak
 from eth_account import Account
+from web3 import Web3
 
-from .api import ProtocolApi
+from .api import MAXIMUM_INSTANCE_UPLOAD_BYTES, ProtocolApi
 from .chain import (
     ACCESS_STATUS_DISABLED,
     ACCESS_STATUS_PRICED,
@@ -19,7 +25,9 @@ from .chain import (
     LEGACY_ARTIFACT_ACCESS_CONTROLLER,
     LEGACY_SOLVER_BOND_BOUNTY_MANAGER,
     LEGACY_SOLVER_BOND_CHAIN_ID,
+    compute_solution_commit_hash,
     sign_access_message,
+    sign_solution_upload_message,
 )
 from .config import (
     CONFIG_PATH,
@@ -48,8 +56,12 @@ from .formatting import (
 
 MINIMUM_BOUNTY_WINDOW_HOURS = 1
 MINIMUM_BOUNTY_WINDOW_SECONDS = MINIMUM_BOUNTY_WINDOW_HOURS * 60 * 60
-MAXIMUM_VERIFIER_QUORUM = 100
+REQUIRED_VERIFIER_QUORUM = 1
 MAXIMUM_PROOF_UPLOAD_BYTES = 100 * 1024 * 1024
+MAXIMUM_SAT_SOLUTION_UPLOAD_BYTES = 25 * 1024 * 1024
+MAXIMUM_MATCHED_CNF_BYTES = 25 * 1024 * 1024
+DIRECT_MATCHED_CNF_UPLOAD_THRESHOLD_BYTES = int(3.5 * 1024 * 1024)
+MAXIMUM_ARTIFACT_ID_BYTES = 256
 
 
 def make_api(config: dict[str, Any]) -> ProtocolApi:
@@ -338,14 +350,23 @@ def command_doctor(args: argparse.Namespace) -> None:
 
 
 def command_issue(args: argparse.Namespace) -> None:
+    if args.quorum != REQUIRED_VERIFIER_QUORUM:
+        raise RuntimeError(
+            f"Verifier quorum is temporarily fixed at {REQUIRED_VERIFIER_QUORUM}; "
+            f"--quorum must be {REQUIRED_VERIFIER_QUORUM}."
+        )
+
+    instance_path = Path(args.cnf)
+    if not instance_path.exists():
+        raise RuntimeError(f"CNF file not found: {instance_path}")
+    if instance_path.stat().st_size > MAXIMUM_INSTANCE_UPLOAD_BYTES:
+        raise RuntimeError("Instance CNF files must be 4 MiB or smaller.")
+
     config = load_config()
     api = make_api(config)
     token = token_by_symbol(config, args.token)
     if len(args.description or "") > 200:
         raise SystemExit("Task description must be 200 characters or fewer.")
-    instance_path = Path(args.cnf)
-    if not instance_path.exists():
-        raise RuntimeError(f"CNF file not found: {instance_path}")
 
     cnf_text = read_text_file(instance_path)
     cnf_summary = validate_dimacs_cnf(cnf_text)
@@ -354,9 +375,6 @@ def command_issue(args: argparse.Namespace) -> None:
     verify_seconds = int(round(float(args.verify_hours) * 3600))
     if min(commit_seconds, reveal_seconds, verify_seconds) < MINIMUM_BOUNTY_WINDOW_SECONDS:
         raise RuntimeError(f"All timing windows must be at least {MINIMUM_BOUNTY_WINDOW_HOURS} hours.")
-    if args.quorum <= 0 or args.quorum > MAXIMUM_VERIFIER_QUORUM:
-        raise RuntimeError(f"Verifier quorum must be between 1 and {MAXIMUM_VERIFIER_QUORUM}.")
-
     reward_raw = parse_token_amount(args.reward, int(token["decimals"]))
     posting_fee_raw = 0 if str(args.posting_fee).strip() in {"", "0"} else parse_token_amount(args.posting_fee, int(token["decimals"]))
     verifier_pool_raw: int | None = None
@@ -525,12 +543,82 @@ def command_upload_solution(args: argparse.Namespace) -> None:
         raise RuntimeError(f"Solution file not found: {solution_path}")
     solution_kind = normalize_solution_kind(args.kind)
     proof_format = normalize_proof_format(args.proof_format, solution_kind)
-    if solution_kind == 2 and solution_path.stat().st_size > MAXIMUM_PROOF_UPLOAD_BYTES:
+    solution_size = solution_path.stat().st_size
+    if solution_kind == 2 and solution_size > MAXIMUM_PROOF_UPLOAD_BYTES:
         raise RuntimeError("UNSAT proof files must be 100 MiB or smaller.")
-    result = api.upload_file(
-        "solution",
-        solution_path,
-        content_type="text/plain",
+    if solution_kind == 1 and solution_size > MAXIMUM_SAT_SOLUTION_UPLOAD_BYTES:
+        raise RuntimeError("SAT solution files must be 25 MiB or smaller.")
+
+    key = require_private_key(args)
+    digest = _keccak_file_hex(solution_path)
+    upload_id = str(uuid.uuid4())
+    upload_token = secrets.token_urlsafe(32)
+    upload_token_hash = f"0x{hashlib.sha256(upload_token.encode('ascii')).hexdigest()}"
+    auth_fields = {
+        "chain_id": int(config["chain_id"]),
+        "bounty_manager": str(config["bounty_manager"]),
+        "file_name": solution_path.name,
+        "size": solution_size,
+        "digest": digest,
+        "solution_kind": solution_kind,
+        "proof_format": proof_format,
+        "upload_id": upload_id,
+        "token_hash": upload_token_hash,
+    }
+    reservation_auth = sign_solution_upload_message(key, action="reserve", **auth_fields)
+    reservation = api.initialize_solution_upload(
+        upload_id=upload_id,
+        token=upload_token,
+        wallet=reservation_auth["wallet"],
+        timestamp=reservation_auth["timestamp"],
+        signature=reservation_auth["signature"],
+        file_name=solution_path.name,
+        size=solution_size,
+        digest=digest,
+        solution_kind=solution_kind,
+        proof_format=proof_format,
+    )
+    upload_id, token = api.upload_reserved_solution(solution_path, reservation)
+    result = None
+    completion_error: Exception | None = None
+    for attempt in range(10):
+        completion_auth = sign_solution_upload_message(key, action="complete", **auth_fields)
+        try:
+            result = api.complete_solution_upload(
+                upload_id=upload_id,
+                token=token,
+                wallet=completion_auth["wallet"],
+                timestamp=completion_auth["timestamp"],
+                signature=completion_auth["signature"],
+            )
+            break
+        except Exception as error:
+            completion_error = error
+            message = str(error).lower()
+            retryable = any(
+                marker in message
+                for marker in (
+                    "timed out",
+                    "connection",
+                    "temporarily",
+                    "retry",
+                    "being finalized",
+                    "capacity is busy",
+                    "http 429",
+                    "http 503",
+                    "http 504",
+                )
+            )
+            if not retryable or attempt == 9:
+                raise
+            time.sleep(min(30, 2 ** attempt))
+    if result is None:
+        raise RuntimeError("Direct upload completion did not return an artifact.") from completion_error
+    result = _validated_solution_artifact(
+        result,
+        digest=digest,
+        name=solution_path.name,
+        size=solution_size,
         solution_kind=solution_kind,
         proof_format=proof_format,
     )
@@ -539,9 +627,64 @@ def command_upload_solution(args: argparse.Namespace) -> None:
     print("Solution uploaded")
     print(f"Kind: {solution_kind_label(solution_kind)}")
     print(f"Proof format: {proof_format_label(proof_format)}")
-    print(f"Ref: {result['ref']}")
+    print(f"Artifact ID: {result['artifactId']}")
     print(f"Digest: {result['digest']}")
     print(f"Size: {result['size']} bytes")
+
+
+def _keccak_file_hex(path: Path) -> str:
+    digest = keccak.new(digest_bits=256)
+    with path.open("rb") as payload:
+        while chunk := payload.read(1024 * 1024):
+            digest.update(chunk)
+    return f"0x{digest.hexdigest()}"
+
+
+def _artifact_id(value: Any) -> str:
+    if not isinstance(value, str):
+        raise RuntimeError("Solution artifact id is required.")
+    artifact_id = value.strip()
+    if (
+        not artifact_id
+        or len(artifact_id.encode("utf-8")) > MAXIMUM_ARTIFACT_ID_BYTES
+        or any(ord(character) < 0x20 or ord(character) == 0x7F for character in artifact_id)
+    ):
+        raise RuntimeError("Solution artifact id is invalid.")
+    return artifact_id
+
+
+def _validated_solution_artifact(
+    result: Any,
+    *,
+    digest: str,
+    name: str,
+    size: int,
+    solution_kind: int,
+    proof_format: int,
+) -> dict[str, Any]:
+    if not isinstance(result, dict):
+        raise RuntimeError("Completed direct upload did not return a solution artifact.")
+    artifact_id = _artifact_id(result.get("artifactId"))
+    if (
+        str(result.get("digest") or "").lower() != digest.lower()
+        or result.get("size") != size
+        or result.get("name") != name
+        or result.get("solutionKind") != solution_kind
+        or result.get("proofFormat") != proof_format
+    ):
+        raise RuntimeError("Completed direct upload does not match the selected solution file.")
+    # Return only the public opaque binding. Upload URLs, object keys and storage
+    # metadata are transport details and must never become CLI output.
+    return {
+        "artifactId": artifact_id,
+        "digest": digest.lower(),
+        "name": name,
+        "size": size,
+        "solutionKind": solution_kind,
+        "solutionKindName": result.get("solutionKindName") or solution_kind_label(solution_kind),
+        "proofFormat": proof_format,
+        "proofFormatName": result.get("proofFormatName") or proof_format_label(proof_format),
+    }
 
 
 def _prepare_commit_payload(args: argparse.Namespace, config: dict[str, Any]) -> dict[str, Any]:
@@ -556,7 +699,7 @@ def _prepare_commit_payload(args: argparse.Namespace, config: dict[str, Any]) ->
         "solver": solver,
         "solutionKind": solution_kind,
         "proofFormat": proof_format,
-        "solutionRef": args.solution_ref,
+        "artifactId": _artifact_id(args.artifact_id),
         "solutionDigest": args.solution_digest,
     }
     if args.salt:
@@ -569,12 +712,88 @@ def _print_commit_preview(prepared: dict[str, Any], config: dict[str, Any]) -> N
     print(f"Bounty: {prepared['bountyCode']} ({prepared['bountyId']})")
     print(f"Solver: {prepared['solver']}")
     print(f"Solution kind: {prepared.get('solutionKindCode')} / {prepared.get('proofFormatName')}")
-    print(f"Solution ref: {prepared['solutionRef']}")
+    print(f"Artifact ID: {_artifact_id(prepared.get('artifactId'))}")
     print(f"Solution digest: {prepared['solutionDigest']}")
     print(f"Salt: {prepared['salt']}")
     print(f"Commit hash: {prepared['commitHash']}")
     print(f"Solver bond: {format_token_amount(prepared['solverBond'], int(token['decimals']), token['symbol'])}")
     print_prepared_transactions(prepared["transactions"])
+
+
+def _prepared_reveal_bundle(prepared: dict[str, Any], expected_artifact_id: str) -> dict[str, Any]:
+    reveal_bundle = prepared.get("revealBundle")
+    if not isinstance(reveal_bundle, dict):
+        raise RuntimeError("Prepared commit did not return a reveal bundle.")
+    if _artifact_id(reveal_bundle.get("artifactId")) != expected_artifact_id:
+        raise RuntimeError("Prepared commit reveal bundle is missing the bound solution artifact id.")
+    return reveal_bundle
+
+
+def _assert_commit_transaction_shape(prepared: dict[str, Any]) -> None:
+    commit_transactions = [
+        transaction
+        for transaction in prepared.get("transactions", [])
+        if isinstance(transaction, dict) and transaction.get("functionName") == "commitSolution"
+    ]
+    if len(commit_transactions) != 1:
+        raise RuntimeError("Prepared commit must contain exactly one commitSolution transaction.")
+    expected = [str(prepared.get("bountyId")), str(prepared.get("commitHash"))]
+    actual = [str(value) for value in commit_transactions[0].get("args", [])]
+    if actual != expected:
+        raise RuntimeError("Prepared commitSolution arguments do not match the digest-only protocol.")
+
+
+def _assert_commit_binding(
+    prepared: dict[str, Any], payload: dict[str, Any], config: dict[str, Any]
+) -> None:
+    try:
+        expected_fields = (
+            int(prepared.get("chainId", -1)) == int(config["chain_id"])
+            and str(prepared.get("bountyManager", "")).lower()
+            == str(config["bounty_manager"]).lower()
+            and str(prepared.get("solver", "")).lower() == str(payload.get("solver", "")).lower()
+            and str(prepared.get("solutionDigest", "")).lower()
+            == str(payload.get("solutionDigest", "")).lower()
+            and int(prepared.get("solutionKind", -1)) == int(payload.get("solutionKind", -2))
+            and int(prepared.get("proofFormat", -1)) == int(payload.get("proofFormat", -2))
+        )
+    except (KeyError, TypeError, ValueError) as error:
+        raise RuntimeError("Prepared commit descriptor is malformed.") from error
+    if not expected_fields:
+        raise RuntimeError("Prepared commit descriptor does not match the requested solution artifact.")
+    expected_hash = compute_solution_commit_hash(
+        chain_id=int(config["chain_id"]),
+        bounty_manager=str(config["bounty_manager"]),
+        bounty_id=str(prepared.get("bountyId")),
+        solver=str(payload["solver"]),
+        solution_kind=int(payload["solutionKind"]),
+        proof_format=int(payload["proofFormat"]),
+        solution_digest=str(payload["solutionDigest"]),
+        salt=str(prepared.get("salt")),
+    )
+    if expected_hash.lower() != str(prepared.get("commitHash", "")).lower():
+        raise RuntimeError("Prepared commit hash does not match the domain-separated digest-only protocol.")
+
+
+def _assert_reveal_transaction_shape(prepared: dict[str, Any], payload: dict[str, Any]) -> None:
+    reveal_transactions = [
+        transaction
+        for transaction in prepared.get("transactions", [])
+        if isinstance(transaction, dict) and transaction.get("functionName") == "revealSolution"
+    ]
+    if len(reveal_transactions) != 1:
+        raise RuntimeError("Prepared reveal must contain exactly one revealSolution transaction.")
+    expected = [
+        str(prepared.get("bountyId")),
+        str(prepared.get("submissionId")),
+        str(payload.get("solutionKind")),
+        str(payload.get("proofFormat")),
+        str(payload.get("solutionDigest")),
+        str(payload.get("salt")),
+    ]
+    actual = [str(value) for value in reveal_transactions[0].get("args", [])]
+    if actual != expected:
+        raise RuntimeError("Prepared revealSolution arguments do not match the digest-only protocol.")
 
 
 def _synchronize_commit_bond(prepared: dict[str, Any], config: dict[str, Any]) -> ChainClient:
@@ -625,10 +844,16 @@ def _synchronize_commit_bond(prepared: dict[str, Any], config: dict[str, Any]) -
 def command_prepare_commit(args: argparse.Namespace) -> None:
     config = load_config()
     api = make_api(config)
-    prepared = api.prepare_commit(_prepare_commit_payload(args, config))
+    payload = _prepare_commit_payload(args, config)
+    prepared = api.prepare_commit(payload)
+    if _artifact_id(prepared.get("artifactId")) != payload["artifactId"]:
+        raise RuntimeError("Prepared commit returned a different solution artifact id.")
+    reveal_bundle = _prepared_reveal_bundle(prepared, payload["artifactId"])
+    _assert_commit_binding(prepared, payload, config)
+    _assert_commit_transaction_shape(prepared)
     _synchronize_commit_bond(prepared, config)
     if args.output:
-        Path(args.output).write_text(json.dumps(prepared["revealBundle"], indent=2) + "\n", encoding="utf-8")
+        Path(args.output).write_text(json.dumps(reveal_bundle, indent=2) + "\n", encoding="utf-8")
     if maybe_json(args, prepared):
         return
     _print_commit_preview(prepared, config)
@@ -639,10 +864,16 @@ def command_prepare_commit(args: argparse.Namespace) -> None:
 def command_commit(args: argparse.Namespace) -> None:
     config = load_config()
     api = make_api(config)
-    prepared = api.prepare_commit(_prepare_commit_payload(args, config))
+    payload = _prepare_commit_payload(args, config)
+    prepared = api.prepare_commit(payload)
+    if _artifact_id(prepared.get("artifactId")) != payload["artifactId"]:
+        raise RuntimeError("Prepared commit returned a different solution artifact id.")
+    reveal_bundle = _prepared_reveal_bundle(prepared, payload["artifactId"])
+    _assert_commit_binding(prepared, payload, config)
+    _assert_commit_transaction_shape(prepared)
     chain = _synchronize_commit_bond(prepared, config)
     if args.output:
-        Path(args.output).write_text(json.dumps(prepared["revealBundle"], indent=2) + "\n", encoding="utf-8")
+        Path(args.output).write_text(json.dumps(reveal_bundle, indent=2) + "\n", encoding="utf-8")
     if maybe_json(args, prepared):
         return
     _print_commit_preview(prepared, config)
@@ -669,7 +900,7 @@ def _load_reveal_bundle(args: argparse.Namespace) -> dict[str, Any]:
         if not (data.get("submissionId") or args.submission_id):
             raise RuntimeError("Reveal requires --submission-id because commit bundles do not know the on-chain submission id.")
         return data
-    required = ["bounty", "submission_id", "solution_ref", "solution_digest", "salt"]
+    required = ["bounty", "submission_id", "artifact_id", "solution_digest", "salt"]
     missing = [name for name in required if not getattr(args, name)]
     if missing:
         raise RuntimeError(f"Missing reveal fields: {', '.join(missing)}. Use --bundle or provide explicit fields.")
@@ -680,7 +911,7 @@ def _load_reveal_bundle(args: argparse.Namespace) -> dict[str, Any]:
         "submissionId": args.submission_id,
         "solutionKind": solution_kind,
         "proofFormat": proof_format,
-        "solutionRef": args.solution_ref,
+        "artifactId": _artifact_id(args.artifact_id),
         "solutionDigest": args.solution_digest,
         "salt": args.salt,
     }
@@ -693,16 +924,18 @@ def command_reveal(args: argparse.Namespace) -> None:
     bounty_input = str(bundle.get("bountyId") or bundle.get("bounty") or args.bounty or "").strip()
     if not bounty_input:
         raise RuntimeError("Reveal requires a bounty id/code.")
+    artifact_id = _artifact_id(bundle.get("artifactId") or args.artifact_id)
     payload = {
         "bounty": bounty_input,
         "submissionId": str(bundle.get("submissionId") or args.submission_id),
         "solutionKind": bundle.get("solutionKind", normalize_solution_kind(args.kind)),
         "proofFormat": bundle.get("proofFormat", normalize_proof_format(args.proof_format, normalize_solution_kind(args.kind))),
-        "solutionRef": bundle.get("solutionRef"),
+        "artifactId": artifact_id,
         "solutionDigest": bundle.get("solutionDigest"),
         "salt": bundle.get("salt"),
     }
     prepared = api.prepare_reveal(payload)
+    _assert_reveal_transaction_shape(prepared, payload)
     if maybe_json(args, prepared):
         return
     print(f"Bounty: {prepared['bountyCode']} ({prepared['bountyId']})")
@@ -729,13 +962,51 @@ def _resolve_bounty_and_token(api: ProtocolApi, config: dict[str, Any], bounty_i
     return result, token
 
 
+def _read_matched_query(cnf_path: str | None) -> tuple[str, bytes] | None:
+    if not cnf_path:
+        return None
+    path = Path(cnf_path)
+    if not path.is_file():
+        raise RuntimeError(f"CNF file not found: {path}")
+    if not path.name.lower().endswith(".cnf"):
+        raise RuntimeError("Matched answer queries must use a .cnf file.")
+    payload = path.read_bytes()
+    if not payload:
+        raise RuntimeError("Matched answer CNF must not be empty.")
+    if len(payload) > MAXIMUM_MATCHED_CNF_BYTES:
+        raise RuntimeError("Matched answer CNF must be 25 MiB or smaller.")
+    return path.name, payload
+
+
+def _finalized_winner_solution_kind(bounty_result: dict[str, Any]) -> int | None:
+    bounty = bounty_result.get("bounty")
+    if not isinstance(bounty, dict):
+        return None
+    winning_id = str(bounty.get("finalizedWinningSubmissionId") or "")
+    if not winning_id or winning_id == "0":
+        return None
+    for submission in bounty_result.get("submissions") or []:
+        if isinstance(submission, dict) and str(submission.get("submissionId") or "") == winning_id:
+            try:
+                return int(submission.get("solutionKind"))
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
+def _keccak_hex(payload: bytes) -> str:
+    digest = Web3.keccak(payload).hex()
+    return digest if digest.startswith("0x") else f"0x{digest}"
+
+
 def command_buy_answer(args: argparse.Namespace) -> None:
     config = load_config()
     api = make_api(config)
+    query_file = _read_matched_query(args.cnf)
+    bounty_result, token = _resolve_bounty_and_token(api, config, args.bounty)
     key = require_private_key(args)
     chain = make_chain(config)
     account = Account.from_key(key)
-    bounty_result, token = _resolve_bounty_and_token(api, config, args.bounty)
     bounty_id = bounty_result["bountyId"]
     bounty = bounty_result["bounty"]
     controller = config["artifact_access_controller"]
@@ -762,7 +1033,7 @@ def command_buy_answer(args: argparse.Namespace) -> None:
             )
         if args.download:
             args.bounty = bounty_id
-            command_download_answer(args)
+            command_download_answer(args, query_file=query_file)
         return
 
     quote_epoch, quote_status, price = chain.access_quote(controller, bounty_id, payment_token)
@@ -813,35 +1084,74 @@ def command_buy_answer(args: argparse.Namespace) -> None:
             raise RuntimeError("Purchase reverted.")
     if args.download:
         args.bounty = bounty_id
-        command_download_answer(args)
+        command_download_answer(args, query_file=query_file)
 
 
-def command_download_answer(args: argparse.Namespace) -> None:
+def command_download_answer(
+    args: argparse.Namespace, *, query_file: tuple[str, bytes] | None = None
+) -> None:
     config = load_config()
     api = make_api(config)
-    key = require_private_key(args)
     bounty_result = api.bounty(args.bounty)
+    if query_file is None:
+        query_file = _read_matched_query(args.cnf)
+    key = require_private_key(args)
     bounty_id = bounty_result["bountyId"]
+    requested_matched_query = query_file is not None
+    transform_timeout_minutes = int(getattr(args, "transform_timeout_minutes", 60))
+    if transform_timeout_minutes < 1 or transform_timeout_minutes > 24 * 60:
+        raise RuntimeError("--transform-timeout-minutes must be between 1 and 1440.")
+    request_query_file = query_file
+    query_upload: tuple[str, str] | None = None
+
+    if query_file is not None:
+        query_digest = _keccak_hex(query_file[1]).lower()
+        source_digest = str(bounty_result.get("bounty", {}).get("instanceDigest") or "").lower()
+        if source_digest and query_digest == source_digest:
+            # A raw-exact query can use the byte-preserving GET route without
+            # posting the CNF through the web function again.
+            request_query_file = None
+        elif len(query_file[1]) > DIRECT_MATCHED_CNF_UPLOAD_THRESHOLD_BYTES:
+            initial_auth = sign_access_message(
+                key,
+                chain_id=int(config["chain_id"]),
+                bounty_manager=config["bounty_manager"],
+                bounty_id=bounty_id,
+            )
+            query_upload = api.upload_unsat_transform_target(
+                bounty_id=bounty_id,
+                wallet=initial_auth["wallet"],
+                timestamp=initial_auth["timestamp"],
+                signature=initial_auth["signature"],
+                query_file=query_file,
+            )
+            request_query_file = None
+
     auth = sign_access_message(
         key,
         chain_id=int(config["chain_id"]),
         bounty_manager=config["bounty_manager"],
         bounty_id=bounty_id,
     )
-    query_text = read_text_file(args.cnf) if args.cnf else None
     payload, disposition = api.download_answer(
         bounty_id=bounty_id,
         wallet=auth["wallet"],
         timestamp=auth["timestamp"],
         signature=auth["signature"],
-        query_text=query_text,
+        query_file=request_query_file,
+        query_upload=query_upload,
+        max_wait_seconds=transform_timeout_minutes * 60,
     )
-    fallback = f"3sat_{bounty_result['bountyCode']}{'_matched' if query_text else ''}.zip"
+    fallback = f"3sat_{bounty_result['bountyCode']}{'_matched' if requested_matched_query else ''}.zip"
     output = Path(args.output or filename_from_content_disposition(disposition, fallback))
     write_bytes(output, payload)
     print(f"Downloaded: {output}")
-    if query_text:
-        print("This matched bundle is rebuilt for the CNF you provided.")
+    if requested_matched_query:
+        print(
+            "Matched answer bundle downloaded. SAT assignments and UNSAT proofs are delivered "
+            "for the provided CNF; transformed UNSAT proofs are returned only after the target "
+            "proof checker accepts them."
+        )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -909,7 +1219,13 @@ def build_parser() -> argparse.ArgumentParser:
     issue.add_argument("--open-hours", type=float, default=MINIMUM_BOUNTY_WINDOW_HOURS)
     issue.add_argument("--reveal-hours", type=float, default=MINIMUM_BOUNTY_WINDOW_HOURS)
     issue.add_argument("--verify-hours", type=float, default=MINIMUM_BOUNTY_WINDOW_HOURS)
-    issue.add_argument("--quorum", type=int, default=1)
+    issue.add_argument(
+        "--quorum",
+        type=int,
+        choices=[REQUIRED_VERIFIER_QUORUM],
+        default=REQUIRED_VERIFIER_QUORUM,
+        help=f"Verifier quorum; temporarily fixed at {REQUIRED_VERIFIER_QUORUM}.",
+    )
     issue.add_argument("--dry-run", action="store_true", help="Only validate local CNF/params and print preview; upload nothing.")
     issue.add_argument("--send", action="store_true", help="Broadcast the approve and create-bounty transactions.")
     issue.add_argument("--private-key")
@@ -920,13 +1236,17 @@ def build_parser() -> argparse.ArgumentParser:
     upload_solution.add_argument("solution")
     upload_solution.add_argument("--kind", default="sat", choices=["sat", "unsat", "SAT", "UNSAT"])
     upload_solution.add_argument("--proof-format", default="drat", choices=["drat", "frat", "lrat", "DRAT", "FRAT", "LRAT"])
+    upload_solution.add_argument(
+        "--private-key",
+        help="Required for wallet-authenticated solution uploads; may also be set with 3SAT_PRIVATE_KEY.",
+    )
     upload_solution.add_argument("--json", action="store_true")
     upload_solution.set_defaults(func=command_upload_solution)
 
     def add_commit_args(commit_parser: argparse.ArgumentParser) -> None:
         commit_parser.add_argument("bounty")
         commit_parser.add_argument("--solver", help="Solver wallet address. Optional if --private-key is provided.")
-        commit_parser.add_argument("--solution-ref", required=True)
+        commit_parser.add_argument("--artifact-id", required=True, help="Opaque artifact id returned by upload-solution.")
         commit_parser.add_argument("--solution-digest", required=True)
         commit_parser.add_argument("--kind", default="sat", choices=["sat", "unsat", "SAT", "UNSAT"])
         commit_parser.add_argument("--proof-format", default="drat", choices=["drat", "frat", "lrat", "DRAT", "FRAT", "LRAT"])
@@ -948,7 +1268,7 @@ def build_parser() -> argparse.ArgumentParser:
     reveal.add_argument("--bundle", help="Reveal bundle JSON from prepare-commit/commit.")
     reveal.add_argument("--bounty", help="Bounty code or id; optional if bundle includes bountyId.")
     reveal.add_argument("--submission-id", help="Submission id assigned by the commit transaction.")
-    reveal.add_argument("--solution-ref")
+    reveal.add_argument("--artifact-id", help="Opaque artifact id returned by upload-solution.")
     reveal.add_argument("--solution-digest")
     reveal.add_argument("--salt")
     reveal.add_argument("--kind", default="sat", choices=["sat", "unsat", "SAT", "UNSAT"])
@@ -962,15 +1282,39 @@ def build_parser() -> argparse.ArgumentParser:
     buy.add_argument("bounty")
     buy.add_argument("--send", action="store_true", help="Broadcast approval and purchase transactions.")
     buy.add_argument("--download", action="store_true", help="Download after purchase/access check.")
-    buy.add_argument("--cnf", help="CNF query file; downloads a matched bundle rebuilt for this CNF.")
+    buy.add_argument(
+        "--cnf",
+        help=(
+            "CNF query file. Equivalent SAT assignments may be rebuilt, and UNSAT proofs are "
+            "converted and checked against this exact CNF before download."
+        ),
+    )
     buy.add_argument("-o", "--output")
+    buy.add_argument(
+        "--transform-timeout-minutes",
+        type=int,
+        default=60,
+        help="Maximum time to wait for checked UNSAT proof conversion when --download is used (default: 60).",
+    )
     buy.add_argument("--private-key")
     buy.set_defaults(func=command_buy_answer)
 
     download = sub.add_parser("download-answer", help="Download an answer bundle after issuer or paid-access checks.")
     download.add_argument("bounty")
-    download.add_argument("--cnf", help="CNF query file; downloads a matched bundle rebuilt for this CNF.")
+    download.add_argument(
+        "--cnf",
+        help=(
+            "CNF query file. Equivalent SAT assignments may be rebuilt, and UNSAT proofs are "
+            "converted and checked against this exact CNF before download."
+        ),
+    )
     download.add_argument("-o", "--output")
+    download.add_argument(
+        "--transform-timeout-minutes",
+        type=int,
+        default=60,
+        help="Maximum time to wait for checked UNSAT proof conversion (default: 60).",
+    )
     download.add_argument("--private-key")
     download.set_defaults(func=command_download_answer)
 

@@ -16,7 +16,8 @@ keywords = ["3sat", "sat", "web3", "cnf", "bounty"]
 dependencies = [
   "requests>=2.31.0",
   "web3>=6.20.0,<8",
-  "eth-account>=0.10.0"
+  "eth-account>=0.10.0",
+  "pycryptodome>=3.20.0"
 ]
 
 [project.scripts]

@@ -67,13 +67,13 @@ Check the configured API, RPC, contracts, tokens, and optional wallet balances:
 3sat tokens --onchain
 ```
 
-Create a bounty. The command prepares and uploads the instance/metadata first. It broadcasts only when `--send` is provided:
+Create a bounty. The command accepts a DIMACS CNF instance up to 4 MiB, leaving multipart headroom beneath Vercel's 4.5 MB request limit, then prepares and uploads the instance/metadata first. It broadcasts only when `--send` is provided:
 
 ```bash
 3sat issue problem.cnf --reward 100 --token USDC --send
 ```
 
-The default open, reveal, and verification windows are 1 hour each. Every window must be at least 1 hour, and verifier quorum must be between 1 and 100.
+The default open, reveal, and verification windows are 1 hour each. Every window must be at least 1 hour. During the official-verifier launch phase, verifier quorum is fixed at 1; `--quorum` is retained for compatibility but rejects every value other than `1`.
 
 Run a true local dry run without uploading files:
 
@@ -93,11 +93,13 @@ Download an original finalized bounty bundle:
 3sat download-answer SAT-XXXX-XXXX-XXXX -o answer.zip
 ```
 
-Download a matched bundle rebuilt for the CNF you searched:
+Download a matched answer for a CNF you searched. SAT assignments may be rebuilt for an equivalent CNF. For a format-normalized or variable-renamed UNSAT match, the service converts the finalized proof in an isolated worker and returns the bundle only after the matching checker accepts the proof against the exact CNF you supplied:
 
 ```bash
 3sat download-answer SAT-XXXX-XXXX-XXXX --cnf my-query.cnf -o matched-answer.zip
 ```
+
+UNSAT conversion jobs are asynchronous. The CLI waits up to 60 minutes by default (override with `--transform-timeout-minutes`), requires a valid checker-bound ZIP digest and size, verifies both against the downloaded bytes, and fails without writing an answer when parsing, conversion, or target proof checking fails. Matched CNFs larger than 3.5 MiB use the direct target-CNF upload for both SAT and UNSAT answers instead of passing through the web function body. The PUT URL lasts up to 45 minutes and its idempotent reservation remains completable for 60 minutes.
 
 ## Commands
 
@@ -116,10 +118,10 @@ Download a matched bundle rebuilt for the CNF you searched:
 - `3sat buy-answer SAT-... --send`
 - `3sat download-answer SAT-... --cnf query.cnf`
 - `3sat balance --address 0x...`
-- `3sat upload-solution answer.cnf --kind sat`
-- `3sat upload-solution proof.frat --kind unsat --proof-format frat`
-- `3sat prepare-commit SAT-... --solver 0x... --solution-ref r2://... --solution-digest 0x... -o reveal.json`
-- `3sat commit SAT-... --solution-ref r2://... --solution-digest 0x... --private-key 0x... --send -o reveal.json`
+- `3sat upload-solution answer.cnf --kind sat --private-key 0x...`
+- `3sat upload-solution proof.frat --kind unsat --proof-format frat --private-key 0x...`
+- `3sat prepare-commit SAT-... --solver 0x... --artifact-id artifact-... --solution-digest 0x... -o reveal.json`
+- `3sat commit SAT-... --artifact-id artifact-... --solution-digest 0x... --private-key 0x... --send -o reveal.json`
 - `3sat reveal --bundle reveal.json --submission-id 1 --private-key 0x... --send`
 
 ## Solver flow for advanced users
@@ -131,23 +133,27 @@ Issuer task descriptions are limited to 200 characters. This keeps public metada
 Upload a SAT answer:
 
 ```bash
-3sat upload-solution answer.cnf --kind sat
+3sat upload-solution answer.cnf --kind sat --private-key 0x...
 ```
 
 Upload an UNSAT proof:
 
 ```bash
-3sat upload-solution unsat-proof.frat --kind unsat --proof-format frat
+3sat upload-solution unsat-proof.frat --kind unsat --proof-format frat --private-key 0x...
 ```
 
-UNSAT proof uploads are limited to 100 MiB.
+UNSAT proof uploads are limited to 100 MiB. Every SAT assignment and UNSAT proof uses a wallet-authenticated, two-phase direct upload, so solution bytes do not pass through the Vercel request body and the server can bind the opaque artifact to its uploader. The CLI generates and signs an idempotent upload id/token binding before reserving, so a lost reservation response can be retried without consuming another slot. The private key may be supplied by `--private-key` or `3SAT_PRIVATE_KEY`.
+
+Successful solution uploads return an opaque `artifactId`, not an R2 object location. Keep the artifact id and digest for commit and reveal. The artifact id is used only by the API to bind the private upload to the solver; it is not placed on chain and is not included in the commitment hash.
+
+The solver passed to `prepare-commit` must be the same wallet that signed `upload-solution`. A different wallet cannot claim or reveal that private artifact.
 
 Prepare a commit without broadcasting:
 
 ```bash
 3sat prepare-commit SAT-XXXX-XXXX-XXXX \
   --solver 0xSolverWallet \
-  --solution-ref r2://... \
+  --artifact-id artifact-... \
   --solution-digest 0x... \
   -o reveal.json
 ```
@@ -156,7 +162,7 @@ Broadcast a commit:
 
 ```bash
 3sat commit SAT-XXXX-XXXX-XXXX \
-  --solution-ref r2://... \
+  --artifact-id artifact-... \
   --solution-digest 0x... \
   --private-key 0x... \
   --send \
@@ -164,6 +170,8 @@ Broadcast a commit:
 ```
 
 Before preparing or sending a commit, the CLI verifies the bounty's snapshotted solver bond directly on chain and rebuilds the approval with that value. The current legacy Arbitrum Sepolia BountyManager (`0x942b...C767`) predates bond snapshots, so only that exact contract on chain `421614` temporarily uses its on-chain token-level bond configuration. New deployments never use this fallback, and a snapshot value of zero is rejected.
+
+The commitment binds the chain id, BountyManager address, bounty id, solver, solution kind, proof format, solution digest, and salt. The opaque artifact id stays in the local reveal bundle so the API can recover and verify the private upload binding, but neither commit nor reveal stores it on chain.
 
 The current legacy Arbitrum Sepolia AccessController (`0x6cBC...effB`) predates protected price quotes and manager epochs. The CLI preserves downloads for wallets that already have access, but deliberately disables new paid purchases on that exact legacy deployment until the migrated AccessController is live.
 

@@ -122,6 +122,100 @@ ARTIFACT_ACCESS_ABI = [
 BOUNTY_MANAGER_ABI = [
     {
         "type": "function",
+        "name": "commitSolution",
+        "stateMutability": "nonpayable",
+        "inputs": [
+            {"name": "bountyId", "type": "uint256"},
+            {"name": "commitHash", "type": "bytes32"},
+        ],
+        "outputs": [{"name": "submissionId", "type": "uint256"}],
+    },
+    {
+        "type": "function",
+        "name": "computeCommitHash",
+        "stateMutability": "view",
+        "inputs": [
+            {"name": "bountyId", "type": "uint256"},
+            {"name": "solver", "type": "address"},
+            {"name": "solutionKind", "type": "uint8"},
+            {"name": "proofFormat", "type": "uint8"},
+            {"name": "solutionDigest", "type": "bytes32"},
+            {"name": "salt", "type": "bytes32"},
+        ],
+        "outputs": [{"name": "", "type": "bytes32"}],
+    },
+    {
+        "type": "function",
+        "name": "revealSolution",
+        "stateMutability": "nonpayable",
+        "inputs": [
+            {"name": "bountyId", "type": "uint256"},
+            {"name": "submissionId", "type": "uint256"},
+            {"name": "solutionKind", "type": "uint8"},
+            {"name": "proofFormat", "type": "uint8"},
+            {"name": "solutionDigest", "type": "bytes32"},
+            {"name": "salt", "type": "bytes32"},
+        ],
+        "outputs": [],
+    },
+    {
+        "type": "function",
+        "name": "attest",
+        "stateMutability": "nonpayable",
+        "inputs": [
+            {"name": "bountyId", "type": "uint256"},
+            {"name": "submissionId", "type": "uint256"},
+            {"name": "support", "type": "bool"},
+        ],
+        "outputs": [],
+    },
+    {
+        "type": "function",
+        "name": "getSubmission",
+        "stateMutability": "view",
+        "inputs": [
+            {"name": "bountyId", "type": "uint256"},
+            {"name": "submissionId", "type": "uint256"},
+        ],
+        "outputs": [
+            {
+                "name": "",
+                "type": "tuple",
+                "components": [
+                    {"name": "solver", "type": "address"},
+                    {"name": "commitHash", "type": "bytes32"},
+                    {"name": "solutionDigest", "type": "bytes32"},
+                    {"name": "solutionKind", "type": "uint8"},
+                    {"name": "proofFormat", "type": "uint8"},
+                    {"name": "bondToken", "type": "address"},
+                    {"name": "solverBond", "type": "uint256"},
+                    {"name": "committedAt", "type": "uint64"},
+                    {"name": "revealedAt", "type": "uint64"},
+                    {"name": "quorumReachedAt", "type": "uint64"},
+                    {"name": "forVotes", "type": "uint16"},
+                    {"name": "againstVotes", "type": "uint16"},
+                    {"name": "bondSettled", "type": "bool"},
+                    {"name": "bondSlashed", "type": "bool"},
+                    {"name": "state", "type": "uint8"},
+                ],
+            }
+        ],
+    },
+    {
+        "type": "event",
+        "name": "SolutionRevealed",
+        "anonymous": False,
+        "inputs": [
+            {"name": "bountyId", "type": "uint256", "indexed": True},
+            {"name": "submissionId", "type": "uint256", "indexed": True},
+            {"name": "solver", "type": "address", "indexed": True},
+            {"name": "solutionDigest", "type": "bytes32", "indexed": False},
+            {"name": "solutionKind", "type": "uint8", "indexed": False},
+            {"name": "proofFormat", "type": "uint8", "indexed": False},
+        ],
+    },
+    {
+        "type": "function",
         "name": "verifierRewardPoolFor",
         "stateMutability": "view",
         "inputs": [{"name": "reward", "type": "uint256"}],
@@ -149,6 +243,48 @@ BOUNTY_MANAGER_ABI = [
         "outputs": [{"name": "bondAmount", "type": "uint256"}],
     },
 ]
+
+
+def compute_solution_commit_hash(
+    *,
+    chain_id: int,
+    bounty_manager: str,
+    bounty_id: int | str,
+    solver: str,
+    solution_kind: int,
+    proof_format: int,
+    solution_digest: str,
+    salt: str,
+) -> str:
+    if not Web3.is_address(bounty_manager) or not Web3.is_address(solver):
+        raise ValueError("Commitment domain requires valid manager and solver addresses.")
+    try:
+        digest_bytes = bytes.fromhex(solution_digest[2:])
+    except (AttributeError, TypeError, ValueError) as error:
+        raise ValueError("Solution digest must be a 32-byte hex value.") from error
+    try:
+        salt_bytes = bytes.fromhex(salt[2:])
+    except (AttributeError, TypeError, ValueError) as error:
+        raise ValueError("Salt must be a 32-byte hex value.") from error
+    if not isinstance(solution_digest, str) or not solution_digest.startswith("0x") or len(digest_bytes) != 32:
+        raise ValueError("Solution digest must be a 32-byte hex value.")
+    if not isinstance(salt, str) or not salt.startswith("0x") or len(salt_bytes) != 32:
+        raise ValueError("Salt must be a 32-byte hex value.")
+    encoded = Web3().codec.encode(
+        ["uint256", "address", "uint256", "address", "uint8", "uint8", "bytes32", "bytes32"],
+        [
+            int(chain_id),
+            Web3.to_checksum_address(bounty_manager),
+            int(bounty_id),
+            Web3.to_checksum_address(solver),
+            int(solution_kind),
+            int(proof_format),
+            digest_bytes,
+            salt_bytes,
+        ],
+    )
+    digest = Web3.keccak(encoded).hex()
+    return digest if digest.startswith("0x") else f"0x{digest}"
 
 
 class ChainClient:
@@ -378,4 +514,89 @@ def sign_access_message(private_key: str, *, chain_id: int, bounty_manager: str,
         bounty_manager=bounty_manager,
     )
     signed = Account.sign_message(encode_defunct(text=message), private_key)
-    return {"wallet": account.address, "timestamp": timestamp, "signature": signed.signature.hex(), "message": message}
+    signature = signed.signature.hex()
+    if not signature.startswith("0x"):
+        signature = f"0x{signature}"
+    return {"wallet": account.address, "timestamp": timestamp, "signature": signature, "message": message}
+
+
+def solution_upload_auth_message(
+    *,
+    action: str,
+    wallet: str,
+    file_name: str,
+    size: int,
+    digest: str,
+    solution_kind: int,
+    proof_format: int,
+    timestamp: str,
+    chain_id: int,
+    bounty_manager: str,
+    upload_id: str,
+    token_hash: str,
+) -> str:
+    if action not in {"reserve", "complete"}:
+        raise ValueError("Solution upload action must be reserve or complete.")
+    if not upload_id:
+        raise ValueError("Solution upload signatures require an upload id.")
+    if len(token_hash) != 66 or not token_hash.startswith("0x"):
+        raise ValueError("Solution upload signatures require a 32-byte token hash.")
+    return "\n".join(
+        [
+            "3SAT Solution Artifact Upload",
+            f"action: {action}",
+            f"chainId: {chain_id}",
+            f"bountyManager: {bounty_manager.lower()}",
+            f"wallet: {wallet.lower()}",
+            f"uploadId: {upload_id}",
+            f"tokenHash: {token_hash.lower()}",
+            f"solutionKind: {solution_kind}",
+            f"proofFormat: {proof_format}",
+            f"digest: {digest.lower()}",
+            f"size: {size}",
+            f"fileNameUtf8: 0x{file_name.encode('utf-8').hex()}",
+            f"timestamp: {timestamp}",
+        ]
+    )
+
+
+def sign_solution_upload_message(
+    private_key: str,
+    *,
+    action: str,
+    chain_id: int,
+    bounty_manager: str,
+    file_name: str,
+    size: int,
+    digest: str,
+    solution_kind: int,
+    proof_format: int,
+    upload_id: str,
+    token_hash: str,
+) -> dict[str, str]:
+    account = Account.from_key(private_key)
+    timestamp = str(int(time.time() * 1000))
+    message = solution_upload_auth_message(
+        action=action,
+        wallet=account.address,
+        upload_id=upload_id,
+        token_hash=token_hash,
+        file_name=file_name,
+        size=size,
+        digest=digest,
+        solution_kind=solution_kind,
+        proof_format=proof_format,
+        timestamp=timestamp,
+        chain_id=chain_id,
+        bounty_manager=bounty_manager,
+    )
+    signed = Account.sign_message(encode_defunct(text=message), private_key)
+    signature = signed.signature.hex()
+    if not signature.startswith("0x"):
+        signature = f"0x{signature}"
+    return {
+        "wallet": account.address,
+        "timestamp": timestamp,
+        "signature": signature,
+        "message": message,
+    }
