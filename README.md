@@ -169,11 +169,11 @@ Broadcast a commit:
   -o reveal.json
 ```
 
-Before preparing or sending a commit, the CLI verifies the bounty's snapshotted solver bond directly on chain and rebuilds the approval with that value. The current legacy Arbitrum Sepolia BountyManager (`0x942b...C767`) predates bond snapshots, so only that exact contract on chain `421614` temporarily uses its on-chain token-level bond configuration. New deployments never use this fallback, and a snapshot value of zero is rejected.
+Before preparing or sending a commit, the CLI verifies the bounty's snapshotted solver bond directly on chain and rebuilds the approval with that value. The legacy Arbitrum Sepolia BountyManager (`0x942b...C767`) predates bond snapshots, so only that exact contract on chain `421614` uses its on-chain token-level bond configuration for backward compatibility. New deployments never use this fallback, and a snapshot value of zero is rejected.
 
 The commitment binds the chain id, BountyManager address, bounty id, solver, solution kind, proof format, solution digest, and salt. The opaque artifact id stays in the local reveal bundle so the API can recover and verify the private upload binding, but neither commit nor reveal stores it on chain.
 
-The current legacy Arbitrum Sepolia AccessController (`0x6cBC...effB`) predates protected price quotes and manager epochs. The CLI preserves downloads for wallets that already have access, but deliberately disables new paid purchases on that exact legacy deployment until the migrated AccessController is live.
+The legacy Arbitrum Sepolia AccessController (`0x6cBC...effB`) predates protected price quotes and manager epochs. The CLI preserves downloads for wallets that already have access, but deliberately disables new paid purchases on that exact legacy deployment. The current default deployment uses the protected AccessController flow.
 
 Reveal after commit. Use the submission id assigned by the commit transaction:
 

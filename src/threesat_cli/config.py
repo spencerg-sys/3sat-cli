@@ -15,10 +15,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "rpc_url": "https://sepolia-rollup.arbitrum.io/rpc",
     "chain_id": 421614,
     "chain_name": "Arbitrum Sepolia",
-    "bounty_manager": "0x942b326B190d588fE1bb3931502f509c9f9eC767",
-    "artifact_access_controller": "0x6cBCbdDcbE1c4c51237526C152650A4CB4F5effB",
+    "bounty_manager": "0x4158B40E1Aa41Cd386b7936B1023Fe094f77Fed1",
+    "artifact_access_controller": "0x93c055B36fD94177644447ed96B76A805baaFA27",
     "usdc": "0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d",
-    "sat_token": "0x8Fe0e3557773B200995608a43691f3dE9B2e3Fda",
+    "sat_token": "0xa86B949636480d6DEf03677965FfC45b121174fb",
     "tokens": {
         "USDC": {
             "symbol": "USDC",
@@ -27,7 +27,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         },
         "3SAT": {
             "symbol": "$3SAT",
-            "address": "0x8Fe0e3557773B200995608a43691f3dE9B2e3Fda",
+            "address": "0xa86B949636480d6DEf03677965FfC45b121174fb",
             "decimals": 18,
         },
     },
@@ -143,4 +143,3 @@ def private_key_from_args(value: str | None) -> str | None:
     if not key:
         return None
     return key if key.startswith("0x") else f"0x{key}"
-
