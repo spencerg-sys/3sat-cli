@@ -8,6 +8,13 @@ from typing import Any
 
 from web3 import Web3
 
+from .dimacs_parser_core import (
+    ParsedCnf,
+    encode_dimacs_cnf_text,
+    parse_dimacs_cnf_bytes,
+    parse_dimacs_cnf_text,
+)
+
 
 def print_json(value: Any) -> None:
     print(json.dumps(value, indent=2, ensure_ascii=False))
@@ -61,50 +68,41 @@ def short_address(address: str) -> str:
 
 
 def validate_dimacs_cnf(text: str) -> dict[str, Any]:
-    variables: int | None = None
-    declared_clauses: int | None = None
-    clauses: list[list[int]] = []
-    current: list[int] = []
+    payload = encode_dimacs_cnf_text(text)
+    parsed = parse_dimacs_cnf_text(text)
+    return _dimacs_summary(parsed, payload)
 
-    for line_number, raw_line in enumerate(text.splitlines(), start=1):
-        line = raw_line.strip()
-        if not line or line.startswith("c"):
-            continue
-        if line.startswith("p"):
-            parts = line.split()
-            if len(parts) != 4 or parts[0] != "p" or parts[1].lower() != "cnf":
-                raise ValueError(f"Line {line_number}: problem line must be: p cnf <variables> <clauses>")
-            variables = int(parts[2])
-            declared_clauses = int(parts[3])
-            if variables < 0 or declared_clauses < 0:
-                raise ValueError("Variable and clause counts must be non-negative.")
-            continue
 
-        for token in line.split():
-            try:
-                literal = int(token)
-            except ValueError as exc:
-                raise ValueError(f"Line {line_number}: invalid DIMACS token {token!r}") from exc
-            if literal == 0:
-                clauses.append(current)
-                current = []
-                continue
-            variable = abs(literal)
-            if variables is not None and variable > variables:
-                raise ValueError(f"Line {line_number}: literal {literal} exceeds declared variable count {variables}.")
-            current.append(literal)
+def validate_dimacs_cnf_bytes(payload: bytes) -> dict[str, Any]:
+    parsed = parse_dimacs_cnf_bytes(payload)
+    return _dimacs_summary(parsed, payload)
 
-    if variables is None or declared_clauses is None:
-        raise ValueError("Missing DIMACS problem line.")
-    if current:
-        raise ValueError("Last clause is missing a terminating 0.")
-    if len(clauses) != declared_clauses:
-        raise ValueError(f"Declared {declared_clauses} clauses, but parsed {len(clauses)}.")
 
-    digest = Web3.keccak(text.encode("utf-8")).hex()
+def validate_unit_clause_assignment(parsed: ParsedCnf) -> dict[int, bool]:
+    assignment: dict[int, bool] = {}
+    for clause in parsed.clauses:
+        if len(clause) != 1:
+            raise ValueError(
+                "SAT solution CNF must contain only unit clauses in assignment mode."
+            )
+        literal = clause[0]
+        variable = abs(literal)
+        value = literal > 0
+        if variable in assignment and assignment[variable] != value:
+            raise ValueError(f"Conflicting SAT assignment for variable {variable}.")
+        assignment[variable] = value
+    return assignment
+
+
+def _dimacs_summary(parsed: ParsedCnf, payload: bytes) -> dict[str, Any]:
+    digest = Web3.keccak(payload).hex()
     if not digest.startswith("0x"):
         digest = f"0x{digest}"
-    return {"variables": variables, "clauses": len(clauses), "rawDigest": digest}
+    return {
+        "variables": parsed.variables,
+        "clauses": len(parsed.clauses),
+        "rawDigest": digest,
+    }
 
 
 def normalize_solution_kind(value: str | int | None) -> int:

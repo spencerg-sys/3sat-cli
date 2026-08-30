@@ -24,6 +24,12 @@ Verify the installation:
 3sat doctor
 ```
 
+The wheel embeds its own Python implementation of the
+`3sat-dimacs-strict-v1` parser plus the shared conformance corpus. It does not
+need the TypeScript core or Node.js at runtime. File-based CNF commands validate
+bounded raw bytes locally before configuration, wallet, or network operations;
+SAT artifacts must additionally be non-conflicting unit-clause assignments.
+
 ## Security
 
 Use a dedicated protocol wallet. Do not use your main wallet.
@@ -172,6 +178,8 @@ Broadcast a commit:
 Before preparing or sending a commit, the CLI verifies the bounty's snapshotted solver bond directly on chain and rebuilds the approval with that value. The legacy Arbitrum Sepolia BountyManager (`0x942b...C767`) predates bond snapshots, so only that exact contract on chain `421614` uses its on-chain token-level bond configuration for backward compatibility. New deployments never use this fallback, and a snapshot value of zero is rejected.
 
 The commitment binds the chain id, BountyManager address, bounty id, solver, solution kind, proof format, solution digest, and salt. The opaque artifact id stays in the local reveal bundle so the API can recover and verify the private upload binding, but neither commit nor reveal stores it on chain.
+
+For `commit --send`, the CLI writes the reveal bundle atomically before broadcasting any approval or commit. Without `-o`, it uses `data/reveal-bundles/bounty-<id>-commit-<hash>.json`; if that write fails, nothing is broadcast. The bundle contains the secret salt required to reveal, so keep it durable and private and do not delete, share, sync, upload, or include it in a ZIP until the submission has been revealed.
 
 The legacy Arbitrum Sepolia AccessController (`0x6cBC...effB`) predates protected price quotes and manager epochs. The CLI preserves downloads for wallets that already have access, but deliberately disables new paid purchases on that exact legacy deployment. The current default deployment uses the protected AccessController flow.
 

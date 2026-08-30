@@ -3,8 +3,11 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
+import re
 import secrets
 import sys
+import tempfile
 import time
 import uuid
 from pathlib import Path
@@ -39,6 +42,11 @@ from .config import (
     token_by_address,
     token_by_symbol,
 )
+from .dimacs_parser_core import (
+    InvalidDimacsError,
+    load_dimacs_cnf_file,
+    parse_dimacs_cnf_bytes,
+)
 from .formatting import (
     filename_from_content_disposition,
     format_token_amount,
@@ -47,10 +55,10 @@ from .formatting import (
     parse_token_amount,
     print_json,
     proof_format_label,
-    read_text_file,
     short_address,
     solution_kind_label,
-    validate_dimacs_cnf,
+    validate_dimacs_cnf_bytes,
+    validate_unit_clause_assignment,
     write_bytes,
 )
 
@@ -62,6 +70,7 @@ MAXIMUM_SAT_SOLUTION_UPLOAD_BYTES = 25 * 1024 * 1024
 MAXIMUM_MATCHED_CNF_BYTES = 25 * 1024 * 1024
 DIRECT_MATCHED_CNF_UPLOAD_THRESHOLD_BYTES = int(3.5 * 1024 * 1024)
 MAXIMUM_ARTIFACT_ID_BYTES = 256
+DEFAULT_REVEAL_BUNDLE_DIRECTORY = Path("data") / "reveal-bundles"
 
 
 def make_api(config: dict[str, Any]) -> ProtocolApi:
@@ -122,9 +131,9 @@ def command_config(args: argparse.Namespace) -> None:
 
 
 def command_standardize(args: argparse.Namespace) -> None:
+    payload, _parsed = load_dimacs_cnf_file(args.cnf)
     api = make_api(load_config())
-    text = read_text_file(args.cnf)
-    result = api.standardize(text)
+    result = api.standardize(payload, file_name=Path(args.cnf).name)
     if maybe_json(args, result):
         return
     print("CNF standardized")
@@ -132,19 +141,30 @@ def command_standardize(args: argparse.Namespace) -> None:
     print(f"Clauses:   {result.get('clauses')}")
     print(f"Digest:    {result.get('canonicalDigest')}")
     if args.output:
-        Path(args.output).write_text(result["canonicalText"], encoding="utf-8")
+        write_bytes(args.output, result["canonicalText"].encode("utf-8"))
         print(f"Wrote:     {args.output}")
     elif args.print_text:
         print("\n" + result["canonicalText"])
 
 
 def command_search(args: argparse.Namespace) -> None:
+    payload, _parsed = load_dimacs_cnf_file(args.cnf)
     api = make_api(load_config())
-    text = read_text_file(args.cnf)
-    result = api.search(text)
+    result = api.search(payload, file_name=Path(args.cnf).name)
+    query = result.get("query") if isinstance(result, dict) else None
+    returned_raw_digest = (
+        str(query.get("rawDigest") or "") if isinstance(query, dict) else ""
+    )
+    expected_raw_digest = _keccak_hex(payload)
+    if (
+        re.fullmatch(r"0x[0-9a-fA-F]{64}", returned_raw_digest) is None
+        or returned_raw_digest.lower() != expected_raw_digest.lower()
+    ):
+        raise RuntimeError(
+            "Search response raw digest does not match the locally validated CNF bytes."
+        )
     if maybe_json(args, result):
         return
-    query = result.get("query", {})
     print(result.get("databaseStatusLabel", "Search completed."))
     print(f"CNF: {query.get('variables', '-')} variables / {query.get('clauses', '-')} clauses")
     print(f"Raw digest: {query.get('rawDigest')}")
@@ -357,10 +377,17 @@ def command_issue(args: argparse.Namespace) -> None:
         )
 
     instance_path = Path(args.cnf)
-    if not instance_path.exists():
+    if not instance_path.is_file():
         raise RuntimeError(f"CNF file not found: {instance_path}")
-    if instance_path.stat().st_size > MAXIMUM_INSTANCE_UPLOAD_BYTES:
-        raise RuntimeError("Instance CNF files must be 4 MiB or smaller.")
+    try:
+        cnf_payload, _parsed_cnf = load_dimacs_cnf_file(
+            instance_path,
+            {"max_input_bytes": MAXIMUM_INSTANCE_UPLOAD_BYTES},
+        )
+    except InvalidDimacsError as error:
+        if "byte resource limit" in str(error):
+            raise RuntimeError("Instance CNF files must be 4 MiB or smaller.") from error
+        raise
 
     config = load_config()
     api = make_api(config)
@@ -368,8 +395,7 @@ def command_issue(args: argparse.Namespace) -> None:
     if len(args.description or "") > 200:
         raise SystemExit("Task description must be 200 characters or fewer.")
 
-    cnf_text = read_text_file(instance_path)
-    cnf_summary = validate_dimacs_cnf(cnf_text)
+    cnf_summary = validate_dimacs_cnf_bytes(cnf_payload)
     commit_seconds = int(round(float(args.open_hours) * 3600))
     reveal_seconds = int(round(float(args.reveal_hours) * 3600))
     verify_seconds = int(round(float(args.verify_hours) * 3600))
@@ -451,8 +477,23 @@ def command_issue(args: argparse.Namespace) -> None:
         return
 
     print(f"Uploading instance: {instance_path}")
-    instance = api.upload_file("instance", instance_path, content_type="text/plain")
-    print(f"Instance uploaded. Digest: {instance['digest']}")
+    instance = api.upload_file(
+        "instance",
+        instance_path,
+        content=cnf_payload,
+        content_type="text/plain",
+    )
+    uploaded_instance_digest = (
+        str(instance.get("digest") or "") if isinstance(instance, dict) else ""
+    )
+    if (
+        re.fullmatch(r"0x[0-9a-fA-F]{64}", uploaded_instance_digest) is None
+        or uploaded_instance_digest.lower() != cnf_summary["rawDigest"].lower()
+    ):
+        raise RuntimeError(
+            "Uploaded instance digest does not match the locally validated CNF bytes."
+        )
+    print(f"Instance uploaded. Digest: {uploaded_instance_digest}")
 
     metadata_input = {
         "title": args.title,
@@ -536,21 +577,33 @@ def command_issue(args: argparse.Namespace) -> None:
 
 
 def command_upload_solution(args: argparse.Namespace) -> None:
-    config = load_config()
-    api = make_api(config)
     solution_path = Path(args.solution)
-    if not solution_path.exists():
+    if not solution_path.is_file():
         raise RuntimeError(f"Solution file not found: {solution_path}")
     solution_kind = normalize_solution_kind(args.kind)
     proof_format = normalize_proof_format(args.proof_format, solution_kind)
-    solution_size = solution_path.stat().st_size
-    if solution_kind == 2 and solution_size > MAXIMUM_PROOF_UPLOAD_BYTES:
-        raise RuntimeError("UNSAT proof files must be 100 MiB or smaller.")
-    if solution_kind == 1 and solution_size > MAXIMUM_SAT_SOLUTION_UPLOAD_BYTES:
-        raise RuntimeError("SAT solution files must be 25 MiB or smaller.")
+    if solution_kind == 1:
+        try:
+            solution_payload, parsed_solution = load_dimacs_cnf_file(
+                solution_path,
+                {"max_input_bytes": MAXIMUM_SAT_SOLUTION_UPLOAD_BYTES},
+            )
+        except InvalidDimacsError as error:
+            if "byte resource limit" in str(error):
+                raise RuntimeError("SAT solution files must be 25 MiB or smaller.") from error
+            raise
+        validate_unit_clause_assignment(parsed_solution)
+        solution_size = len(solution_payload)
+        digest = _keccak_hex(solution_payload)
+    else:
+        solution_size = solution_path.stat().st_size
+        if solution_size > MAXIMUM_PROOF_UPLOAD_BYTES:
+            raise RuntimeError("UNSAT proof files must be 100 MiB or smaller.")
+        digest = _keccak_file_hex(solution_path)
 
+    config = load_config()
+    api = make_api(config)
     key = require_private_key(args)
-    digest = _keccak_file_hex(solution_path)
     upload_id = str(uuid.uuid4())
     upload_token = secrets.token_urlsafe(32)
     upload_token_hash = f"0x{hashlib.sha256(upload_token.encode('ascii')).hexdigest()}"
@@ -578,7 +631,11 @@ def command_upload_solution(args: argparse.Namespace) -> None:
         solution_kind=solution_kind,
         proof_format=proof_format,
     )
-    upload_id, token = api.upload_reserved_solution(solution_path, reservation)
+    upload_id, token = api.upload_reserved_solution(
+        solution_path,
+        reservation,
+        content=solution_payload if solution_kind == 1 else None,
+    )
     result = None
     completion_error: Exception | None = None
     for attempt in range(10):
@@ -724,16 +781,117 @@ def _prepared_reveal_bundle(prepared: dict[str, Any], expected_artifact_id: str)
     reveal_bundle = prepared.get("revealBundle")
     if not isinstance(reveal_bundle, dict):
         raise RuntimeError("Prepared commit did not return a reveal bundle.")
-    if _artifact_id(reveal_bundle.get("artifactId")) != expected_artifact_id:
-        raise RuntimeError("Prepared commit reveal bundle is missing the bound solution artifact id.")
-    return reveal_bundle
+    try:
+        canonical = {
+            "bountyId": str(prepared["bountyId"]),
+            "artifactId": expected_artifact_id,
+            "solutionKind": int(prepared["solutionKind"]),
+            "proofFormat": int(prepared["proofFormat"]),
+            "solutionDigest": str(prepared["solutionDigest"]).lower(),
+            "salt": str(prepared["salt"]).lower(),
+            "commitHash": str(prepared["commitHash"]).lower(),
+        }
+        matches = (
+            str(reveal_bundle.get("bountyId")) == canonical["bountyId"]
+            and _artifact_id(reveal_bundle.get("artifactId")) == canonical["artifactId"]
+            and int(reveal_bundle.get("solutionKind", -1)) == canonical["solutionKind"]
+            and int(reveal_bundle.get("proofFormat", -1)) == canonical["proofFormat"]
+            and str(reveal_bundle.get("solutionDigest", "")).lower() == canonical["solutionDigest"]
+            and str(reveal_bundle.get("salt", "")).lower() == canonical["salt"]
+            and str(reveal_bundle.get("commitHash", "")).lower() == canonical["commitHash"]
+            and reveal_bundle.get("submissionId") in (None, "")
+        )
+    except (KeyError, TypeError, ValueError) as error:
+        raise RuntimeError("Prepared commit reveal bundle is malformed.") from error
+    if not matches:
+        raise RuntimeError("Prepared commit reveal bundle does not match the verified commit descriptor.")
+    # Persist only the fields independently bound to the verified commit. This
+    # prevents an unexpected API-only field (for example submissionId) from
+    # changing a later `reveal` command.
+    return canonical
 
 
-def _assert_commit_transaction_shape(prepared: dict[str, Any]) -> None:
+def _safe_path_component(value: Any, *, fallback: str) -> str:
+    raw = str(value).strip()
+    component = re.sub(r"[^A-Za-z0-9_-]+", "-", raw).strip("-_")
+    if not component:
+        component = fallback
+    if len(component) > 96:
+        digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+        component = f"{component[:79]}-{digest}"
+    return component
+
+
+def _default_reveal_bundle_path(prepared: dict[str, Any]) -> Path:
+    bounty_id = _safe_path_component(prepared.get("bountyId"), fallback="unknown")
+    commit_hash = _safe_path_component(prepared.get("commitHash"), fallback="unknown")
+    return DEFAULT_REVEAL_BUNDLE_DIRECTORY / f"bounty-{bounty_id}-commit-{commit_hash}.json"
+
+
+def _atomic_write_private_json(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    file_descriptor, temporary_name = tempfile.mkstemp(
+        dir=path.parent,
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+    )
+    temporary_path = Path(temporary_name)
+    try:
+        with os.fdopen(file_descriptor, "w", encoding="utf-8", newline="\n") as temporary_file:
+            json.dump(payload, temporary_file, indent=2)
+            temporary_file.write("\n")
+            temporary_file.flush()
+            os.fsync(temporary_file.fileno())
+        os.replace(temporary_path, path)
+        if os.name != "nt":
+            path.chmod(0o600)
+            directory_descriptor = os.open(path.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory_descriptor)
+            finally:
+                os.close(directory_descriptor)
+    except BaseException:
+        temporary_path.unlink(missing_ok=True)
+        raise
+
+
+def _write_reveal_bundle(
+    prepared: dict[str, Any], reveal_bundle: dict[str, Any], output: str | None
+) -> Path:
+    path = Path(output).expanduser() if output else _default_reveal_bundle_path(prepared)
+    _atomic_write_private_json(path, reveal_bundle)
+    return path
+
+
+def _commit_solution_data(bounty_id: Any, commit_hash: Any) -> str:
+    try:
+        digest = bytes.fromhex(str(commit_hash)[2:])
+    except (TypeError, ValueError) as error:
+        raise RuntimeError("Prepared commit hash is not valid bytes32 calldata.") from error
+    if not str(commit_hash).startswith("0x") or len(digest) != 32:
+        raise RuntimeError("Prepared commit hash is not valid bytes32 calldata.")
+    selector = Web3.keccak(text="commitSolution(uint256,bytes32)")[:4]
+    encoded = Web3().codec.encode(["uint256", "bytes32"], [int(bounty_id), digest])
+    return f"0x{(selector + encoded).hex()}"
+
+
+def _assert_commit_transaction_shape(
+    prepared: dict[str, Any], config: dict[str, Any], chain: ChainClient
+) -> None:
+    transactions = prepared.get("transactions", [])
+    if not isinstance(transactions, list) or any(not isinstance(tx, dict) for tx in transactions):
+        raise RuntimeError("Prepared commit transactions are malformed.")
+    unexpected = [
+        transaction
+        for transaction in transactions
+        if transaction.get("functionName") not in {"approve", "commitSolution"}
+    ]
+    if unexpected:
+        raise RuntimeError("Prepared commit contains an unexpected transaction.")
     commit_transactions = [
         transaction
-        for transaction in prepared.get("transactions", [])
-        if isinstance(transaction, dict) and transaction.get("functionName") == "commitSolution"
+        for transaction in transactions
+        if transaction.get("functionName") == "commitSolution"
     ]
     if len(commit_transactions) != 1:
         raise RuntimeError("Prepared commit must contain exactly one commitSolution transaction.")
@@ -741,6 +899,43 @@ def _assert_commit_transaction_shape(prepared: dict[str, Any]) -> None:
     actual = [str(value) for value in commit_transactions[0].get("args", [])]
     if actual != expected:
         raise RuntimeError("Prepared commitSolution arguments do not match the digest-only protocol.")
+    commit_transaction = commit_transactions[0]
+    expected_manager = str(config["bounty_manager"])
+    expected_data = _commit_solution_data(prepared.get("bountyId"), prepared.get("commitHash"))
+    try:
+        commit_value = int(commit_transaction.get("value") or 0)
+    except (TypeError, ValueError) as error:
+        raise RuntimeError("Prepared commitSolution value is malformed.") from error
+    if (
+        str(commit_transaction.get("to", "")).lower() != expected_manager.lower()
+        or str(commit_transaction.get("data", "")).lower() != expected_data.lower()
+        or commit_value != 0
+    ):
+        raise RuntimeError("Prepared commitSolution calldata is not bound to the configured manager and commit hash.")
+
+    approval_transactions = [
+        transaction for transaction in transactions if transaction.get("functionName") == "approve"
+    ]
+    if len(approval_transactions) > 1:
+        raise RuntimeError("Prepared commit contains more than one approval transaction.")
+    if approval_transactions:
+        approval = approval_transactions[0]
+        bond_token = str(prepared.get("bondToken", ""))
+        solver_bond = int(prepared.get("solverBond", 0))
+        expected_approval_data = chain.approval_data(bond_token, expected_manager, solver_bond)
+        expected_approval_args = [expected_manager, str(solver_bond)]
+        actual_approval_args = [str(value) for value in approval.get("args", [])]
+        try:
+            approval_value = int(approval.get("value") or 0)
+        except (TypeError, ValueError) as error:
+            raise RuntimeError("Prepared approval value is malformed.") from error
+        if (
+            str(approval.get("to", "")).lower() != bond_token.lower()
+            or str(approval.get("data", "")).lower() != expected_approval_data.lower()
+            or actual_approval_args != expected_approval_args
+            or approval_value != 0
+        ):
+            raise RuntimeError("Prepared approval is not bound to the bond token, manager, and amount.")
 
 
 def _assert_commit_binding(
@@ -850,10 +1045,10 @@ def command_prepare_commit(args: argparse.Namespace) -> None:
         raise RuntimeError("Prepared commit returned a different solution artifact id.")
     reveal_bundle = _prepared_reveal_bundle(prepared, payload["artifactId"])
     _assert_commit_binding(prepared, payload, config)
-    _assert_commit_transaction_shape(prepared)
-    _synchronize_commit_bond(prepared, config)
+    chain = _synchronize_commit_bond(prepared, config)
+    _assert_commit_transaction_shape(prepared, config, chain)
     if args.output:
-        Path(args.output).write_text(json.dumps(reveal_bundle, indent=2) + "\n", encoding="utf-8")
+        _write_reveal_bundle(prepared, reveal_bundle, args.output)
     if maybe_json(args, prepared):
         return
     _print_commit_preview(prepared, config)
@@ -870,19 +1065,25 @@ def command_commit(args: argparse.Namespace) -> None:
         raise RuntimeError("Prepared commit returned a different solution artifact id.")
     reveal_bundle = _prepared_reveal_bundle(prepared, payload["artifactId"])
     _assert_commit_binding(prepared, payload, config)
-    _assert_commit_transaction_shape(prepared)
     chain = _synchronize_commit_bond(prepared, config)
-    if args.output:
-        Path(args.output).write_text(json.dumps(reveal_bundle, indent=2) + "\n", encoding="utf-8")
+    _assert_commit_transaction_shape(prepared, config, chain)
+    will_broadcast = bool(args.send and not args.json)
+    key = require_private_key(args) if will_broadcast else None
+    reveal_bundle_path = None
+    if args.output or will_broadcast:
+        # The salt must be recoverable before the first approval/commit transaction
+        # can reach the chain. A failed write deliberately aborts the command.
+        reveal_bundle_path = _write_reveal_bundle(prepared, reveal_bundle, args.output)
     if maybe_json(args, prepared):
         return
     _print_commit_preview(prepared, config)
-    if args.output:
-        print(f"Reveal bundle written: {args.output}")
+    if reveal_bundle_path:
+        print(f"Reveal bundle written: {reveal_bundle_path}")
     if not args.send:
         print("\nNot broadcast. Add --send to approve the solver bond and commit.")
         return
-    key = require_private_key(args)
+    if key is None:
+        raise RuntimeError("Private key required before broadcasting the commit.")
     for tx in prepared["transactions"]:
         print(f"Sending {tx['label']}...")
         receipt = chain.send_prepared_transaction(tx, key)
@@ -970,11 +1171,17 @@ def _read_matched_query(cnf_path: str | None) -> tuple[str, bytes] | None:
         raise RuntimeError(f"CNF file not found: {path}")
     if not path.name.lower().endswith(".cnf"):
         raise RuntimeError("Matched answer queries must use a .cnf file.")
-    payload = path.read_bytes()
-    if not payload:
-        raise RuntimeError("Matched answer CNF must not be empty.")
-    if len(payload) > MAXIMUM_MATCHED_CNF_BYTES:
-        raise RuntimeError("Matched answer CNF must be 25 MiB or smaller.")
+    try:
+        payload, _parsed = load_dimacs_cnf_file(
+            path,
+            {"max_input_bytes": MAXIMUM_MATCHED_CNF_BYTES},
+        )
+    except InvalidDimacsError as error:
+        if "byte resource limit" in str(error):
+            raise RuntimeError("Matched answer CNF must be 25 MiB or smaller.") from error
+        if path.stat().st_size == 0:
+            raise RuntimeError("Matched answer CNF must not be empty.") from error
+        raise
     return path.name, payload
 
 
@@ -1090,11 +1297,16 @@ def command_buy_answer(args: argparse.Namespace) -> None:
 def command_download_answer(
     args: argparse.Namespace, *, query_file: tuple[str, bytes] | None = None
 ) -> None:
+    if query_file is None:
+        query_file = _read_matched_query(args.cnf)
+    else:
+        parse_dimacs_cnf_bytes(
+            query_file[1],
+            {"max_input_bytes": MAXIMUM_MATCHED_CNF_BYTES},
+        )
     config = load_config()
     api = make_api(config)
     bounty_result = api.bounty(args.bounty)
-    if query_file is None:
-        query_file = _read_matched_query(args.cnf)
     key = require_private_key(args)
     bounty_id = bounty_result["bountyId"]
     requested_matched_query = query_file is not None

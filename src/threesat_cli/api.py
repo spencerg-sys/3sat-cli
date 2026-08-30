@@ -14,7 +14,32 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from web3 import Web3
 
+from .dimacs_parser_core import (
+    DEFAULT_DIMACS_RESOURCE_LIMITS,
+    InvalidDimacsError,
+    parse_dimacs_cnf_bytes,
+    parse_dimacs_cnf_text,
+    read_dimacs_cnf_file_bytes,
+)
+
 MAXIMUM_INSTANCE_UPLOAD_BYTES = 4 * 1024 * 1024
+
+
+def _freeze_validated_dimacs_bytes(
+    value: bytes | bytearray | memoryview, *, maximum_bytes: int
+) -> bytes:
+    """Snapshot, bound, and parse the exact bytes that a request will send."""
+
+    if not isinstance(value, (bytes, bytearray, memoryview)):
+        raise TypeError("DIMACS content must be bytes-like.")
+    input_bytes = value.nbytes if isinstance(value, memoryview) else len(value)
+    if input_bytes > maximum_bytes:
+        raise InvalidDimacsError(
+            f"DIMACS input exceeds the {maximum_bytes}-byte resource limit."
+        )
+    payload = bytes(value)
+    parse_dimacs_cnf_bytes(payload, {"max_input_bytes": maximum_bytes})
+    return payload
 
 
 class ProtocolApi:
@@ -92,10 +117,20 @@ class ProtocolApi:
         if kind not in {"instance", "metadata"}:
             raise RuntimeError("SAT assignments and UNSAT proofs must use the authenticated upload flow.")
         if kind == "instance":
-            instance_size = len(content) if content is not None else file_path.stat().st_size
-            if instance_size > MAXIMUM_INSTANCE_UPLOAD_BYTES:
-                raise RuntimeError("Instance CNF files must be 4 MiB or smaller.")
-        payload = content if content is not None else file_path.read_bytes()
+            instance_limits = {"max_input_bytes": MAXIMUM_INSTANCE_UPLOAD_BYTES}
+            try:
+                if content is None:
+                    payload = read_dimacs_cnf_file_bytes(file_path, instance_limits)
+                else:
+                    payload = _freeze_validated_dimacs_bytes(
+                        content, maximum_bytes=MAXIMUM_INSTANCE_UPLOAD_BYTES
+                    )
+            except ValueError as error:
+                if "byte resource limit" in str(error):
+                    raise RuntimeError("Instance CNF files must be 4 MiB or smaller.") from error
+                raise
+        else:
+            payload = content if content is not None else file_path.read_bytes()
         name = file_name or file_path.name
         data: dict[str, str] = {"kind": kind}
         files = {"file": (name, payload, content_type)}
@@ -148,7 +183,13 @@ class ProtocolApi:
             raise RuntimeError("Direct solution upload reservation is not bound to the selected file.")
         return reservation
 
-    def upload_reserved_solution(self, file_path: Path, reservation: dict[str, Any]) -> tuple[str, str]:
+    def upload_reserved_solution(
+        self,
+        file_path: Path,
+        reservation: dict[str, Any],
+        *,
+        content: bytes | None = None,
+    ) -> tuple[str, str]:
         upload_id = str(reservation.get("id") or "").strip()
         token = str(reservation.get("token") or "").strip()
         direct = reservation.get("upload")
@@ -170,8 +211,15 @@ class ProtocolApi:
             if not isinstance(key, str) or not isinstance(value, str):
                 raise RuntimeError("Direct solution upload headers are invalid.")
             headers[key] = value
-        with file_path.open("rb") as payload:
-            response = self.session.put(upload_url, data=payload, headers=headers, timeout=600)
+        if content is None:
+            with file_path.open("rb") as payload:
+                response = self.session.put(
+                    upload_url, data=payload, headers=headers, timeout=600
+                )
+        else:
+            response = self.session.put(
+                upload_url, data=content, headers=headers, timeout=600
+            )
         if not response.ok:
             raise RuntimeError(
                 f"Direct solution upload failed with HTTP {response.status_code}: {response.reason}"
@@ -217,6 +265,10 @@ class ProtocolApi:
             raise RuntimeError("Matched answer download cannot use both a file and a direct upload.")
         if query_file is not None:
             query_file_name, query_bytes = query_file
+            query_bytes = _freeze_validated_dimacs_bytes(
+                query_bytes,
+                maximum_bytes=DEFAULT_DIMACS_RESOURCE_LIMITS.max_input_bytes,
+            )
             response = self.session.post(
                 self._url("/api/protocol/bundles/answer"),
                 data={
@@ -352,6 +404,10 @@ class ProtocolApi:
         query_file: tuple[str, bytes],
     ) -> tuple[str, str]:
         file_name, payload = query_file
+        payload = _freeze_validated_dimacs_bytes(
+            payload,
+            maximum_bytes=DEFAULT_DIMACS_RESOURCE_LIMITS.max_input_bytes,
+        )
         upload_id = str(uuid.uuid4())
         upload_token = secrets.token_urlsafe(32)
         digest = Web3.keccak(payload).hex()
@@ -415,11 +471,48 @@ class ProtocolApi:
             return 2_000
         return min(max(parsed, 250), 30_000)
 
-    def standardize(self, text: str) -> Any:
-        return self.post("/api/protocol/sdk/cnf/standardize", {"text": text})
+    def standardize(
+        self,
+        value: str | bytes | bytearray | memoryview,
+        *,
+        file_name: str = "query.cnf",
+    ) -> Any:
+        if not isinstance(value, str):
+            payload = _freeze_validated_dimacs_bytes(
+                value,
+                maximum_bytes=DEFAULT_DIMACS_RESOURCE_LIMITS.max_input_bytes,
+            )
+            response = self.session.post(
+                self._url("/api/protocol/sdk/cnf/standardize"),
+                files={"file": (file_name, payload, "text/plain")},
+                timeout=120,
+            )
+            return self._decode(response)
+        # Keep the documented JSON/text SDK contract for programmatic callers.
+        parse_dimacs_cnf_text(value)
+        return self.post("/api/protocol/sdk/cnf/standardize", {"text": value})
 
-    def search(self, text: str) -> Any:
-        return self.post("/api/protocol/search", {"text": text})
+    def search(
+        self,
+        value: str | bytes | bytearray | memoryview,
+        *,
+        file_name: str = "query.cnf",
+    ) -> Any:
+        if not isinstance(value, str):
+            payload = _freeze_validated_dimacs_bytes(
+                value,
+                maximum_bytes=DEFAULT_DIMACS_RESOURCE_LIMITS.max_input_bytes,
+            )
+            response = self.session.post(
+                self._url("/api/protocol/search"),
+                files={"file": (file_name, payload, "text/plain")},
+                timeout=120,
+            )
+            return self._decode(response)
+        # Retained for backwards compatibility with callers that intentionally
+        # submit API text. The CLI file command itself always uses raw bytes.
+        parse_dimacs_cnf_text(value)
+        return self.post("/api/protocol/search", {"text": value})
 
     def bounty(self, bounty_id_or_code: str) -> Any:
         return self.get(f"/api/protocol/sdk/bounties/{quote(bounty_id_or_code)}")

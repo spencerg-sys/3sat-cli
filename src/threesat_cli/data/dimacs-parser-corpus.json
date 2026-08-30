@@ -1,0 +1,73 @@
+{
+  "schemaVersion": 1,
+  "profileVersion": "3sat-dimacs-strict-v1",
+  "valid": [
+    {
+      "name": "basic-lf",
+      "input": "p cnf 3 2\n1 -2 0\n3 0\n",
+      "variables": 3,
+      "clauses": [[1, -2], [3]]
+    },
+    {
+      "name": "comments-crlf-cross-line-and-multiple-per-line",
+      "input": "c comment before header\r\np CNF 3 3\r\n1 -2\r\n3 0 0 2 0\r\n",
+      "variables": 3,
+      "clauses": [[1, -2, 3], [], [2]]
+    },
+    {
+      "name": "cr-only",
+      "input": "c comment\rp cnf 1 1\r1 0\r",
+      "variables": 1,
+      "clauses": [[1]]
+    },
+    {
+      "name": "bom-unicode-interior-whitespace-leading-zero-negative-zero",
+      "input": "﻿p CNF 010 2\n010 0\n-08 -0\n",
+      "variables": 10,
+      "clauses": [[10], [-8]]
+    },
+    {
+      "name": "unicode-marker-boundaries",
+      "input": "c unicode comment\np cnf 1 1\n1 0\n% end",
+      "variables": 1,
+      "clauses": [[1]]
+    },
+    {
+      "name": "ecmascript-whitespace-not-extra-physical-lines",
+      "input": "\u000bp cnf 1﻿1\u000c\n1\u000b0\u000c",
+      "variables": 1,
+      "clauses": [[1]]
+    },
+    {
+      "name": "duplicates-tautology-and-empty-clause",
+      "input": "p cnf 2 3\n1 1 -1 0\n0\n-2 -2 0\n",
+      "variables": 2,
+      "clauses": [[1, 1, -1], [], [-2, -2]]
+    },
+    {
+      "name": "strict-comment-and-terminator",
+      "input": "c\np cnf 0 0\n% end\nignored trailing bytes",
+      "variables": 0,
+      "clauses": []
+    }
+  ],
+  "invalid": [
+    { "name": "comment-prefix-is-data", "input": "cat is not a comment\np cnf 0 0\n" },
+    { "name": "terminator-prefix-is-data", "input": "p cnf 1 1\n%not-a-terminator\n1 0\n" },
+    { "name": "clause-before-header", "input": "1 0\np cnf 1 1\n" },
+    { "name": "missing-header", "input": "c only a comment\n" },
+    { "name": "duplicate-header", "input": "p cnf 0 0\np cnf 0 0\n" },
+    { "name": "extra-header-field", "input": "p cnf 1 1 extra\n1 0\n" },
+    { "name": "missing-zero", "input": "p cnf 1 1\n1\n" },
+    { "name": "literal-outside-header", "input": "p cnf 1 1\n2 0\n" },
+    { "name": "plus-literal", "input": "p cnf 1 1\n+1 0\n" },
+    { "name": "hex-literal", "input": "p cnf 1 1\n0x1 0\n" },
+    { "name": "exponent-header", "input": "p cnf 1e0 0\n" },
+    { "name": "negative-header", "input": "p cnf -1 0\n" },
+    { "name": "unsafe-literal", "input": "p cnf 1 1\n9007199254740993 0\n" },
+    { "name": "python-file-separator-is-not-ecmascript-whitespace", "input": "p\u001ccnf\u001c0\u001c0\n" },
+    { "name": "unicode-next-line-is-not-ecmascript-whitespace", "input": "pcnf00\n" },
+    { "name": "unicode-decimal-digit-is-not-ascii-digit", "input": "p cnf ١ 0\n" },
+    { "name": "clause-count-mismatch", "input": "p cnf 1 2\n1 0\n" }
+  ]
+}
