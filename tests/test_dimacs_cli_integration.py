@@ -14,6 +14,7 @@ from web3 import Web3
 from threesat_cli.api import ProtocolApi
 from threesat_cli.dimacs_parser_core import InvalidDimacsError
 from threesat_cli.main import (
+    _issue_transactions,
     _read_matched_query,
     build_parser,
     command_issue,
@@ -163,16 +164,36 @@ class DimacsCliIntegrationTests(unittest.TestCase):
         payload = b"\xef\xbb\xbfp cnf 1 1\r\n1 0\r\n"
         digest = Web3.keccak(payload).hex()
         digest = digest if digest.startswith("0x") else f"0x{digest}"
+        metadata_digest = Web3.keccak(b"{}").hex()
+        metadata_digest = metadata_digest if metadata_digest.startswith("0x") else f"0x{metadata_digest}"
+        config = protocol_config()
+        token = config["tokens"]["USDC"]
         api = Mock()
-        api.prepare_create_bounty.side_effect = [
-            {"verifierRewardPool": "0", "verifierRewardBps": 0},
-            {"prepared": True},
-        ]
         api.upload_file.side_effect = [
             {"ref": "r2://instance", "digest": digest},
-            {"ref": "r2://metadata", "digest": "0x" + "33" * 32},
+            {"ref": "r2://metadata", "digest": metadata_digest},
         ]
         api.build_metadata.return_value = {"payload": "{}", "fileName": "metadata.json"}
+        api.prepare_create_bounty.side_effect = lambda prepared: {
+            "transactions": _issue_transactions(
+                config=config,
+                token=token,
+                instance_ref=str(prepared["instanceRef"]),
+                instance_digest=str(prepared["instanceDigest"]),
+                metadata_ref=str(prepared["metadataRef"]),
+                metadata_digest=str(prepared["metadataDigest"]),
+                reward=1_000_000,
+                posting_fee=0,
+                verifier_reward_pool=0,
+                commit_window=3_600,
+                reveal_window=3_600,
+                verification_window=3_600,
+                verifier_quorum=1,
+            )
+        }
+        chain = Mock()
+        chain.verifier_reward_pool_for.return_value = 0
+        chain.verifier_reward_bps.return_value = 0
 
         with tempfile.TemporaryDirectory() as temporary_directory:
             path = Path(temporary_directory, "problem.cnf")
@@ -181,8 +202,9 @@ class DimacsCliIntegrationTests(unittest.TestCase):
                 ["issue", str(path), "--reward", "1", "--json"]
             )
             with (
-                patch("threesat_cli.main.load_config", return_value=protocol_config()),
+                patch("threesat_cli.main.load_config", return_value=config),
                 patch("threesat_cli.main.make_api", return_value=api),
+                patch("threesat_cli.main.make_chain", return_value=chain),
                 redirect_stdout(io.StringIO()),
             ):
                 command_issue(args)
@@ -268,6 +290,9 @@ class DimacsCliIntegrationTests(unittest.TestCase):
             "ref": "r2://instance",
             "digest": "0x" + "ff" * 32,
         }
+        chain = Mock()
+        chain.verifier_reward_pool_for.return_value = 0
+        chain.verifier_reward_bps.return_value = 0
         with tempfile.TemporaryDirectory() as temporary_directory:
             path = Path(temporary_directory, "problem.cnf")
             path.write_bytes(b"p cnf 1 1\n1 0\n")
@@ -277,6 +302,7 @@ class DimacsCliIntegrationTests(unittest.TestCase):
             with (
                 patch("threesat_cli.main.load_config", return_value=protocol_config()),
                 patch("threesat_cli.main.make_api", return_value=api),
+                patch("threesat_cli.main.make_chain", return_value=chain),
                 redirect_stdout(io.StringIO()),
                 self.assertRaisesRegex(RuntimeError, "digest does not match"),
             ):

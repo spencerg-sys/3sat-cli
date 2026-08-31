@@ -6,8 +6,8 @@ from pathlib import Path
 from typing import Any
 
 
-CONFIG_DIR = Path(os.environ.get("3SAT_CONFIG_DIR", Path.home() / ".3sat"))
-CONFIG_PATH = Path(os.environ.get("3SAT_CONFIG", CONFIG_DIR / "config.json"))
+CONFIG_DIR = Path(os.environ.get("THREESAT_CONFIG_DIR", Path.home() / ".3sat"))
+CONFIG_PATH = Path(os.environ.get("THREESAT_CONFIG", CONFIG_DIR / "config.json"))
 
 
 DEFAULT_CONFIG: dict[str, Any] = {
@@ -35,14 +35,14 @@ DEFAULT_CONFIG: dict[str, Any] = {
 
 
 ENV_MAP = {
-    "3SAT_API_URL": "api_url",
-    "3SAT_RPC_URL": "rpc_url",
-    "3SAT_CHAIN_ID": "chain_id",
-    "3SAT_CHAIN_NAME": "chain_name",
-    "3SAT_BOUNTY_MANAGER_ADDRESS": "bounty_manager",
-    "3SAT_ARTIFACT_ACCESS_CONTROLLER_ADDRESS": "artifact_access_controller",
-    "3SAT_USDC_ADDRESS": "usdc",
-    "3SAT_TOKEN_ADDRESS": "sat_token",
+    "THREESAT_API_URL": "api_url",
+    "THREESAT_RPC_URL": "rpc_url",
+    "THREESAT_CHAIN_ID": "chain_id",
+    "THREESAT_CHAIN_NAME": "chain_name",
+    "THREESAT_BOUNTY_MANAGER_ADDRESS": "bounty_manager",
+    "THREESAT_ARTIFACT_ACCESS_CONTROLLER_ADDRESS": "artifact_access_controller",
+    "THREESAT_USDC_ADDRESS": "usdc",
+    "THREESAT_TOKEN_ADDRESS": "sat_token",
 }
 
 
@@ -139,7 +139,7 @@ def token_by_address(config: dict[str, Any], address: str) -> dict[str, Any]:
 
 
 def private_key_from_args(value: str | None) -> str | None:
-    key = value or os.environ.get("3SAT_PRIVATE_KEY")
+    key = value or os.environ.get("THREESAT_PRIVATE_KEY")
     if not key:
         return None
     return key if key.startswith("0x") else f"0x{key}"

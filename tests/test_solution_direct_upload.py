@@ -78,7 +78,7 @@ class DirectSolutionUploadTests(unittest.TestCase):
             with (
                 patch("threesat_cli.main.load_config", return_value={
                     "chain_id": 421614,
-                    "bounty_manager": "0x942b326b190d588fe1bb3931502f509c9f9ec767",
+                    "bounty_manager": "0x4158b40e1aa41cd386b7936b1023fe094f77fed1",
                 }),
                 patch("threesat_cli.main.make_api", return_value=api),
                 patch("threesat_cli.main._keccak_file_hex", return_value=digest),
@@ -109,7 +109,7 @@ class DirectSolutionUploadTests(unittest.TestCase):
             proof_format=2,
             timestamp="1700000000000",
             chain_id=421614,
-            bounty_manager="0x942b326b190d588fe1bb3931502f509c9f9ec767",
+            bounty_manager="0x4158b40e1aa41cd386b7936b1023fe094f77fed1",
         )
         self.assertEqual(
             message,
@@ -118,7 +118,7 @@ class DirectSolutionUploadTests(unittest.TestCase):
                     "3SAT Solution Artifact Upload",
                     "action: complete",
                     "chainId: 421614",
-                    "bountyManager: 0x942b326b190d588fe1bb3931502f509c9f9ec767",
+                    "bountyManager: 0x4158b40e1aa41cd386b7936b1023fe094f77fed1",
                     "wallet: 0x1111111111111111111111111111111111111111",
                     "uploadId: 11111111-1111-4111-8111-111111111111",
                     "tokenHash: 0x" + "44" * 32,
@@ -138,7 +138,7 @@ class DirectSolutionUploadTests(unittest.TestCase):
             private_key,
             action="reserve",
             chain_id=421614,
-            bounty_manager="0x942b326b190d588fe1bb3931502f509c9f9ec767",
+            bounty_manager="0x4158b40e1aa41cd386b7936b1023fe094f77fed1",
             file_name="proof.frat",
             size=123,
             digest="0x" + "22" * 32,

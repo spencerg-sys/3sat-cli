@@ -24,11 +24,11 @@ from .chain import (
     ACCESS_STATUS_PUBLIC,
     ACCESS_STATUS_UNCONFIGURED,
     ChainClient,
-    LEGACY_ACCESS_CONTROLLER_CHAIN_ID,
-    LEGACY_ARTIFACT_ACCESS_CONTROLLER,
-    LEGACY_SOLVER_BOND_BOUNTY_MANAGER,
-    LEGACY_SOLVER_BOND_CHAIN_ID,
     compute_solution_commit_hash,
+    encode_approval_data,
+    encode_commit_solution_data,
+    encode_create_bounty_data,
+    encode_reveal_solution_data,
     sign_access_message,
     sign_solution_upload_message,
 )
@@ -71,6 +71,7 @@ MAXIMUM_MATCHED_CNF_BYTES = 25 * 1024 * 1024
 DIRECT_MATCHED_CNF_UPLOAD_THRESHOLD_BYTES = int(3.5 * 1024 * 1024)
 MAXIMUM_ARTIFACT_ID_BYTES = 256
 DEFAULT_REVEAL_BUNDLE_DIRECTORY = Path("data") / "reveal-bundles"
+BOUNTY_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 
 
 def make_api(config: dict[str, Any]) -> ProtocolApi:
@@ -84,7 +85,7 @@ def make_chain(config: dict[str, Any]) -> ChainClient:
 def require_private_key(args: argparse.Namespace) -> str:
     key = private_key_from_args(getattr(args, "private_key", None))
     if not key:
-        raise RuntimeError("Private key required. Pass --private-key or set 3SAT_PRIVATE_KEY.")
+        raise RuntimeError("Private key required. Pass --private-key or set THREESAT_PRIVATE_KEY.")
     return key
 
 
@@ -111,6 +112,116 @@ def print_prepared_transactions(transactions: list[dict[str, Any]]) -> None:
         print(f"{index}. {tx['label']}")
         print(f"   To:   {tx['to']}")
         print(f"   Func: {tx.get('functionName', '-')}")
+
+
+def _local_transaction(
+    *,
+    label: str,
+    contract: str,
+    function_name: str,
+    to: str,
+    data: str,
+    args: list[Any],
+) -> dict[str, Any]:
+    return {
+        "label": label,
+        "contract": contract,
+        "functionName": function_name,
+        "to": to,
+        "data": data,
+        "value": "0",
+        "args": args,
+    }
+
+
+def _assert_prepared_transactions_match(
+    prepared: Any,
+    expected: list[dict[str, Any]],
+    context: str,
+) -> None:
+    if not isinstance(prepared, list) or any(not isinstance(tx, dict) for tx in prepared):
+        raise RuntimeError(f"{context} transactions are malformed.")
+    if len(prepared) != len(expected):
+        raise RuntimeError(f"{context} must contain exactly {len(expected)} transaction(s).")
+
+    for index, (actual, local) in enumerate(zip(prepared, expected), start=1):
+        try:
+            actual_value = int(actual.get("value") or 0)
+        except (TypeError, ValueError) as error:
+            raise RuntimeError(f"{context} transaction {index} value is malformed.") from error
+        if (
+            str(actual.get("functionName", "")) != str(local["functionName"])
+            or str(actual.get("to", "")).lower() != str(local["to"]).lower()
+            or str(actual.get("data", "")).lower() != str(local["data"]).lower()
+            or actual_value != int(local["value"])
+        ):
+            raise RuntimeError(
+                f"{context} transaction {index} is not bound to the locally encoded target, calldata, and value."
+            )
+
+
+def _issue_transactions(
+    *,
+    config: dict[str, Any],
+    token: dict[str, Any],
+    instance_ref: str,
+    instance_digest: str,
+    metadata_ref: str,
+    metadata_digest: str,
+    reward: int,
+    posting_fee: int,
+    verifier_reward_pool: int,
+    commit_window: int,
+    reveal_window: int,
+    verification_window: int,
+    verifier_quorum: int,
+) -> list[dict[str, Any]]:
+    manager = str(config["bounty_manager"])
+    payment_token = str(token["address"])
+    escrow_amount = int(reward) + int(posting_fee) + int(verifier_reward_pool)
+    create_args: list[Any] = [
+        payment_token,
+        instance_ref,
+        instance_digest,
+        metadata_ref,
+        metadata_digest,
+        str(reward),
+        str(posting_fee),
+        str(commit_window),
+        str(reveal_window),
+        str(verification_window),
+        int(verifier_quorum),
+    ]
+    return [
+        _local_transaction(
+            label="Approve bounty escrow",
+            contract=str(token["symbol"]),
+            function_name="approve",
+            to=payment_token,
+            data=encode_approval_data(manager, escrow_amount),
+            args=[manager, str(escrow_amount)],
+        ),
+        _local_transaction(
+            label="Create bounty",
+            contract="BountyManager",
+            function_name="createBounty",
+            to=manager,
+            data=encode_create_bounty_data(
+                payment_token=payment_token,
+                instance_ref=instance_ref,
+                instance_digest=instance_digest,
+                metadata_ref=metadata_ref,
+                metadata_digest=metadata_digest,
+                reward=reward,
+                posting_fee=posting_fee,
+                commit_window=commit_window,
+                reveal_window=reveal_window,
+                verification_window=verification_window,
+                verifier_quorum=verifier_quorum,
+            ),
+            args=create_args,
+        ),
+    ]
 
 
 def command_config(args: argparse.Namespace) -> None:
@@ -405,34 +516,44 @@ def command_issue(args: argparse.Namespace) -> None:
     posting_fee_raw = 0 if str(args.posting_fee).strip() in {"", "0"} else parse_token_amount(args.posting_fee, int(token["decimals"]))
     verifier_pool_raw: int | None = None
     verifier_reward_bps: int | None = None
-    prepared_dry_run: dict[str, Any] | None = None
-    try:
-        prepared_dry_run = api.prepare_create_bounty(
-            {
-                "paymentToken": token["address"],
-                "instanceRef": f"dry-run://{instance_path.name}",
-                "instanceDigest": cnf_summary["rawDigest"],
-                "metadataRef": "dry-run://metadata.json",
-                "metadataDigest": cnf_summary["rawDigest"],
-                "reward": args.reward,
-                "postingFee": args.posting_fee,
-                "commitWindowSeconds": str(commit_seconds),
-                "revealWindowSeconds": str(reveal_seconds),
-                "verificationWindowSeconds": str(verify_seconds),
-                "verifierQuorum": str(args.quorum),
-            }
-        )
-        verifier_pool_raw = int(prepared_dry_run["verifierRewardPool"])
-        verifier_reward_bps = int(prepared_dry_run["verifierRewardBps"])
-    except Exception:
-        prepared_dry_run = None
-    try:
-        if verifier_pool_raw is None:
+    chain: ChainClient | None = None
+    if args.dry_run:
+        try:
+            prepared_dry_run = api.prepare_create_bounty(
+                {
+                    "paymentToken": token["address"],
+                    "instanceRef": f"dry-run://{instance_path.name}",
+                    "instanceDigest": cnf_summary["rawDigest"],
+                    "metadataRef": "dry-run://metadata.json",
+                    "metadataDigest": cnf_summary["rawDigest"],
+                    "reward": args.reward,
+                    "postingFee": args.posting_fee,
+                    "commitWindowSeconds": str(commit_seconds),
+                    "revealWindowSeconds": str(reveal_seconds),
+                    "verificationWindowSeconds": str(verify_seconds),
+                    "verifierQuorum": str(args.quorum),
+                }
+            )
+            verifier_pool_raw = int(prepared_dry_run["verifierRewardPool"])
+            verifier_reward_bps = int(prepared_dry_run["verifierRewardBps"])
+        except Exception:
+            pass
+        try:
+            if verifier_pool_raw is None:
+                chain = make_chain(config)
+                verifier_pool_raw = chain.verifier_reward_pool_for(config["bounty_manager"], reward_raw)
+                verifier_reward_bps = chain.verifier_reward_bps(config["bounty_manager"])
+        except Exception:
+            pass
+    else:
+        try:
             chain = make_chain(config)
             verifier_pool_raw = chain.verifier_reward_pool_for(config["bounty_manager"], reward_raw)
             verifier_reward_bps = chain.verifier_reward_bps(config["bounty_manager"])
-    except Exception:
-        pass
+        except Exception as error:
+            raise RuntimeError(
+                "Could not read the verifier reward pool from the configured BountyManager."
+            ) from error
 
     total_preview = reward_raw + posting_fee_raw + (verifier_pool_raw or 0)
     dry_run_payload = {
@@ -502,6 +623,8 @@ def command_issue(args: argparse.Namespace) -> None:
         "instanceHash": instance["digest"],
         "reward": args.reward,
         "postingFee": args.posting_fee,
+        "verifierRewardBps": str(verifier_reward_bps),
+        "verifierRewardPool": str(verifier_pool_raw),
         "commitWindowHours": str(args.open_hours),
         "revealWindowHours": str(args.reveal_hours),
         "verificationWindowHours": str(args.verify_hours),
@@ -524,7 +647,18 @@ def command_issue(args: argparse.Namespace) -> None:
         file_name=metadata_name,
         content_type="application/json",
     )
-    print(f"Metadata uploaded. Digest: {metadata_upload['digest']}")
+    local_metadata_digest = Web3.keccak(metadata_bytes).hex()
+    if not local_metadata_digest.startswith("0x"):
+        local_metadata_digest = f"0x{local_metadata_digest}"
+    uploaded_metadata_digest = (
+        str(metadata_upload.get("digest") or "") if isinstance(metadata_upload, dict) else ""
+    )
+    if (
+        re.fullmatch(r"0x[0-9a-fA-F]{64}", uploaded_metadata_digest) is None
+        or uploaded_metadata_digest.lower() != local_metadata_digest.lower()
+    ):
+        raise RuntimeError("Uploaded metadata digest does not match the locally generated metadata bytes.")
+    print(f"Metadata uploaded. Digest: {uploaded_metadata_digest}")
 
     prepared = api.prepare_create_bounty(
         {
@@ -532,7 +666,7 @@ def command_issue(args: argparse.Namespace) -> None:
             "instanceRef": instance["ref"],
             "instanceDigest": instance["digest"],
             "metadataRef": metadata_upload["ref"],
-            "metadataDigest": metadata_upload["digest"],
+            "metadataDigest": uploaded_metadata_digest,
             "reward": args.reward,
             "postingFee": args.posting_fee,
             "commitWindowSeconds": str(commit_seconds),
@@ -541,6 +675,42 @@ def command_issue(args: argparse.Namespace) -> None:
             "verifierQuorum": str(args.quorum),
         }
     )
+    if not isinstance(prepared, dict):
+        raise RuntimeError("Prepared bounty creation response is malformed.")
+    if chain is None or verifier_pool_raw is None or verifier_reward_bps is None:
+        raise RuntimeError("Chain-derived bounty fee configuration is unavailable.")
+    local_transactions = _issue_transactions(
+        config=config,
+        token=token,
+        instance_ref=str(instance["ref"]),
+        instance_digest=uploaded_instance_digest,
+        metadata_ref=str(metadata_upload["ref"]),
+        metadata_digest=uploaded_metadata_digest,
+        reward=reward_raw,
+        posting_fee=posting_fee_raw,
+        verifier_reward_pool=verifier_pool_raw,
+        commit_window=commit_seconds,
+        reveal_window=reveal_seconds,
+        verification_window=verify_seconds,
+        verifier_quorum=args.quorum,
+    )
+    _assert_prepared_transactions_match(
+        prepared.get("transactions"),
+        local_transactions,
+        "Prepared bounty creation",
+    )
+    prepared = {
+        **prepared,
+        "chainId": int(config["chain_id"]),
+        "bountyManager": str(config["bounty_manager"]),
+        "paymentToken": str(token["address"]),
+        "paymentSymbol": str(token["symbol"]),
+        "paymentDecimals": int(token["decimals"]),
+        "escrowAmount": str(reward_raw + posting_fee_raw + verifier_pool_raw),
+        "verifierRewardPool": str(verifier_pool_raw),
+        "verifierRewardBps": int(verifier_reward_bps),
+        "transactions": local_transactions,
+    }
     if maybe_json(args, prepared):
         return
 
@@ -562,7 +732,6 @@ def command_issue(args: argparse.Namespace) -> None:
         return
 
     key = require_private_key(args)
-    chain = make_chain(config)
     for tx in prepared["transactions"]:
         print(f"Sending {tx['label']}...")
         receipt = chain.send_prepared_transaction(tx, key)
@@ -863,16 +1032,86 @@ def _write_reveal_bundle(
     return path
 
 
+def _display_bounty_code(bounty_id: int | str, body_length: int = 12) -> str:
+    normalized_id = int(bounty_id)
+    if normalized_id <= 0:
+        raise RuntimeError("Bounty ids must be positive integers.")
+    seed = int.from_bytes(Web3.keccak(text=f"{normalized_id}:"), byteorder="big")
+    value = seed
+    output = ""
+    base = len(BOUNTY_CODE_ALPHABET)
+    for index in range(body_length):
+        output += BOUNTY_CODE_ALPHABET[value % base]
+        value //= base
+        if value == 0:
+            value = seed ^ (index + 1)
+    return f"SAT-{'-'.join(output[index:index + 4] for index in range(0, body_length, 4))}"
+
+
+def _normalize_bounty_code(value: Any) -> str:
+    compact = re.sub(r"[^A-Z0-9]", "", str(value).strip().upper())
+    if compact.startswith("SAT") and len(compact) in {11, 15}:
+        body = compact[3:]
+        return f"SAT-{'-'.join(body[index:index + 4] for index in range(0, len(body), 4))}"
+    return str(value).strip().upper()
+
+
+def _assert_requested_bounty(requested: Any, prepared: dict[str, Any]) -> None:
+    try:
+        prepared_id = int(str(prepared.get("bountyId", "")).strip())
+    except (TypeError, ValueError) as error:
+        raise RuntimeError("Prepared bounty id is malformed.") from error
+    if prepared_id <= 0 or prepared_id >= 2**256:
+        raise RuntimeError("Prepared bounty id must be a positive uint256 value.")
+
+    requested_text = str(requested).strip()
+    if re.fullmatch(r"[0-9]+", requested_text):
+        if int(requested_text) != prepared_id:
+            raise RuntimeError("Prepared bounty id does not match the requested bounty.")
+        return
+
+    requested_code = _normalize_bounty_code(requested_text)
+    valid_codes = {
+        _display_bounty_code(prepared_id),
+        _display_bounty_code(prepared_id, 8),
+    }
+    if requested_code not in valid_codes:
+        raise RuntimeError("Prepared bounty id does not match the requested bounty code.")
+
+
+def _assert_private_key_matches_solver(private_key: str, solver: Any) -> str:
+    signer = Account.from_key(private_key).address
+    if signer.lower() != str(solver).lower():
+        raise RuntimeError("The broadcasting private key does not match the solver bound to the commitment.")
+    return signer
+
+
 def _commit_solution_data(bounty_id: Any, commit_hash: Any) -> str:
     try:
-        digest = bytes.fromhex(str(commit_hash)[2:])
+        return encode_commit_solution_data(int(bounty_id), str(commit_hash))
     except (TypeError, ValueError) as error:
         raise RuntimeError("Prepared commit hash is not valid bytes32 calldata.") from error
-    if not str(commit_hash).startswith("0x") or len(digest) != 32:
-        raise RuntimeError("Prepared commit hash is not valid bytes32 calldata.")
-    selector = Web3.keccak(text="commitSolution(uint256,bytes32)")[:4]
-    encoded = Web3().codec.encode(["uint256", "bytes32"], [int(bounty_id), digest])
-    return f"0x{(selector + encoded).hex()}"
+
+
+def _reveal_solution_data(
+    bounty_id: Any,
+    submission_id: Any,
+    solution_kind: Any,
+    proof_format: Any,
+    solution_digest: Any,
+    salt: Any,
+) -> str:
+    try:
+        return encode_reveal_solution_data(
+            bounty_id=int(bounty_id),
+            submission_id=int(submission_id),
+            solution_kind=int(solution_kind),
+            proof_format=int(proof_format),
+            solution_digest=str(solution_digest),
+            salt=str(salt),
+        )
+    except (TypeError, ValueError) as error:
+        raise RuntimeError("Prepared reveal fields are not valid calldata.") from error
 
 
 def _assert_commit_transaction_shape(
@@ -937,10 +1176,39 @@ def _assert_commit_transaction_shape(
         ):
             raise RuntimeError("Prepared approval is not bound to the bond token, manager, and amount.")
 
+    local_transactions: list[dict[str, Any]] = []
+    if approval_transactions:
+        local_transactions.append(
+            _local_transaction(
+                label="Approve solver bond",
+                contract=str(prepared.get("bondTokenSymbol") or "ERC20"),
+                function_name="approve",
+                to=str(prepared["bondToken"]),
+                data=chain.approval_data(
+                    str(prepared["bondToken"]),
+                    expected_manager,
+                    int(prepared["solverBond"]),
+                ),
+                args=[expected_manager, str(prepared["solverBond"])],
+            )
+        )
+    local_transactions.append(
+        _local_transaction(
+            label="Commit solution",
+            contract="BountyManager",
+            function_name="commitSolution",
+            to=expected_manager,
+            data=expected_data,
+            args=[str(prepared["bountyId"]), str(prepared["commitHash"])],
+        )
+    )
+    prepared["transactions"] = local_transactions
+
 
 def _assert_commit_binding(
     prepared: dict[str, Any], payload: dict[str, Any], config: dict[str, Any]
 ) -> None:
+    _assert_requested_bounty(payload.get("bounty"), prepared)
     try:
         expected_fields = (
             int(prepared.get("chainId", -1)) == int(config["chain_id"])
@@ -956,6 +1224,9 @@ def _assert_commit_binding(
         raise RuntimeError("Prepared commit descriptor is malformed.") from error
     if not expected_fields:
         raise RuntimeError("Prepared commit descriptor does not match the requested solution artifact.")
+    requested_salt = payload.get("salt")
+    if requested_salt is not None and str(prepared.get("salt", "")).lower() != str(requested_salt).lower():
+        raise RuntimeError("Prepared commit salt does not match the explicitly requested salt.")
     expected_hash = compute_solution_commit_hash(
         chain_id=int(config["chain_id"]),
         bounty_manager=str(config["bounty_manager"]),
@@ -970,25 +1241,51 @@ def _assert_commit_binding(
         raise RuntimeError("Prepared commit hash does not match the domain-separated digest-only protocol.")
 
 
-def _assert_reveal_transaction_shape(prepared: dict[str, Any], payload: dict[str, Any]) -> None:
-    reveal_transactions = [
-        transaction
-        for transaction in prepared.get("transactions", [])
-        if isinstance(transaction, dict) and transaction.get("functionName") == "revealSolution"
+def _assert_reveal_transaction_shape(
+    prepared: dict[str, Any],
+    payload: dict[str, Any],
+    config: dict[str, Any],
+) -> None:
+    _assert_requested_bounty(payload.get("bounty"), prepared)
+    try:
+        descriptor_matches = (
+            int(prepared.get("chainId", -1)) == int(config["chain_id"])
+            and str(prepared.get("bountyManager", "")).lower()
+            == str(config["bounty_manager"]).lower()
+            and int(prepared.get("submissionId", -1)) == int(payload.get("submissionId", -2))
+            and _artifact_id(prepared.get("artifactId")) == _artifact_id(payload.get("artifactId"))
+            and int(prepared.get("solutionKind", -1)) == int(payload.get("solutionKind", -2))
+            and int(prepared.get("proofFormat", -1)) == int(payload.get("proofFormat", -2))
+        )
+    except (KeyError, TypeError, ValueError) as error:
+        raise RuntimeError("Prepared reveal descriptor is malformed.") from error
+    if not descriptor_matches:
+        raise RuntimeError("Prepared reveal descriptor does not match the requested chain, manager, or artifact.")
+
+    expected_args: list[Any] = [
+        str(prepared["bountyId"]),
+        str(prepared["submissionId"]),
+        int(payload["solutionKind"]),
+        int(payload["proofFormat"]),
+        str(payload["solutionDigest"]),
+        str(payload["salt"]),
     ]
-    if len(reveal_transactions) != 1:
-        raise RuntimeError("Prepared reveal must contain exactly one revealSolution transaction.")
-    expected = [
-        str(prepared.get("bountyId")),
-        str(prepared.get("submissionId")),
-        str(payload.get("solutionKind")),
-        str(payload.get("proofFormat")),
-        str(payload.get("solutionDigest")),
-        str(payload.get("salt")),
+    local_transactions = [
+        _local_transaction(
+            label="Reveal solution",
+            contract="BountyManager",
+            function_name="revealSolution",
+            to=str(config["bounty_manager"]),
+            data=_reveal_solution_data(*expected_args),
+            args=expected_args,
+        )
     ]
-    actual = [str(value) for value in reveal_transactions[0].get("args", [])]
-    if actual != expected:
-        raise RuntimeError("Prepared revealSolution arguments do not match the digest-only protocol.")
+    _assert_prepared_transactions_match(
+        prepared.get("transactions"),
+        local_transactions,
+        "Prepared reveal",
+    )
+    prepared["transactions"] = local_transactions
 
 
 def _synchronize_commit_bond(prepared: dict[str, Any], config: dict[str, Any]) -> ChainClient:
@@ -996,36 +1293,22 @@ def _synchronize_commit_bond(prepared: dict[str, Any], config: dict[str, Any]) -
     bounty_manager = str(prepared.get("bountyManager") or config["bounty_manager"])
     bounty_id = prepared["bountyId"]
     bond_token = str(prepared["bondToken"])
-    solver_bond_source = "bounty-snapshot"
+    try:
+        onchain_payment_token = chain.bounty_payment_token(bounty_manager, bounty_id)
+    except Exception as error:
+        raise RuntimeError("Could not read the bounty payment token from the configured manager.") from error
+    if onchain_payment_token.lower() != bond_token.lower():
+        raise RuntimeError("Prepared solver bond token does not match the bounty payment token on chain.")
     try:
         solver_bond = chain.bounty_solver_bond(bounty_manager, bounty_id)
-    except Exception as snapshot_error:
-        legacy_fallback_allowed = (
-            chain.chain_id == LEGACY_SOLVER_BOND_CHAIN_ID
-            and bounty_manager.lower() == LEGACY_SOLVER_BOND_BOUNTY_MANAGER
-        )
-        if not legacy_fallback_allowed:
-            raise RuntimeError("Could not read the bounty's snapshotted solver bond.") from snapshot_error
-
-        api_bond_source = prepared.get("solverBondSource")
-        if api_bond_source not in {None, "legacy-token-config"}:
-            raise RuntimeError(
-                "The API solver bond source does not match the configured legacy Arbitrum Sepolia manager."
-            ) from snapshot_error
-
-        # This exact Arbitrum Sepolia deployment predates per-bounty snapshots.
-        # Its token-level value remains the authoritative on-chain source until
-        # the audited BountyManager is deployed; no other manager may use it.
-        solver_bond = chain.solver_bond_for_token(bounty_manager, bond_token)
-        solver_bond_source = "legacy-token-config"
+    except Exception as error:
+        raise RuntimeError("Could not read the bounty's snapshotted solver bond.") from error
 
     if solver_bond <= 0:
-        if solver_bond_source == "bounty-snapshot":
-            raise RuntimeError("The bounty does not have a valid snapshotted solver bond.")
-        raise RuntimeError("The legacy token configuration does not have a valid solver bond.")
+        raise RuntimeError("The bounty does not have a valid snapshotted solver bond.")
 
     prepared["solverBond"] = str(solver_bond)
-    prepared["solverBondSource"] = solver_bond_source
+    prepared["solverBondSource"] = "bounty-snapshot"
     for transaction in prepared.get("transactions", []):
         if transaction.get("functionName") != "approve":
             continue
@@ -1059,7 +1342,11 @@ def command_prepare_commit(args: argparse.Namespace) -> None:
 def command_commit(args: argparse.Namespace) -> None:
     config = load_config()
     api = make_api(config)
+    will_broadcast = bool(args.send and not args.json)
+    key = require_private_key(args) if will_broadcast else None
     payload = _prepare_commit_payload(args, config)
+    if key is not None:
+        _assert_private_key_matches_solver(key, payload["solver"])
     prepared = api.prepare_commit(payload)
     if _artifact_id(prepared.get("artifactId")) != payload["artifactId"]:
         raise RuntimeError("Prepared commit returned a different solution artifact id.")
@@ -1067,8 +1354,6 @@ def command_commit(args: argparse.Namespace) -> None:
     _assert_commit_binding(prepared, payload, config)
     chain = _synchronize_commit_bond(prepared, config)
     _assert_commit_transaction_shape(prepared, config, chain)
-    will_broadcast = bool(args.send and not args.json)
-    key = require_private_key(args) if will_broadcast else None
     reveal_bundle_path = None
     if args.output or will_broadcast:
         # The salt must be recoverable before the first approval/commit transaction
@@ -1118,6 +1403,40 @@ def _load_reveal_bundle(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
+def _assert_explicit_reveal_inputs(
+    args: argparse.Namespace,
+    payload: dict[str, Any],
+    prepared: dict[str, Any] | None = None,
+) -> None:
+    if prepared is not None and args.bounty:
+        _assert_requested_bounty(args.bounty, prepared)
+    try:
+        conflicts = (
+            args.submission_id is not None
+            and int(args.submission_id) != int(payload["submissionId"])
+        ) or (
+            args.artifact_id is not None
+            and _artifact_id(args.artifact_id) != _artifact_id(payload["artifactId"])
+        ) or (
+            args.solution_digest is not None
+            and str(args.solution_digest).lower() != str(payload["solutionDigest"]).lower()
+        ) or (
+            args.salt is not None
+            and str(args.salt).lower() != str(payload["salt"]).lower()
+        ) or (
+            args.kind is not None
+            and normalize_solution_kind(args.kind) != int(payload["solutionKind"])
+        ) or (
+            args.proof_format is not None
+            and normalize_proof_format(args.proof_format, int(payload["solutionKind"]))
+            != int(payload["proofFormat"])
+        )
+    except (KeyError, TypeError, ValueError) as error:
+        raise RuntimeError("Reveal bundle or explicit command fields are malformed.") from error
+    if conflicts:
+        raise RuntimeError("Explicit reveal command fields conflict with the reveal bundle.")
+
+
 def command_reveal(args: argparse.Namespace) -> None:
     config = load_config()
     api = make_api(config)
@@ -1135,8 +1454,14 @@ def command_reveal(args: argparse.Namespace) -> None:
         "solutionDigest": bundle.get("solutionDigest"),
         "salt": bundle.get("salt"),
     }
+    # Reject bundle/CLI conflicts before the preparation endpoint can persist
+    # an artifact-to-commitment binding.
+    _assert_explicit_reveal_inputs(args, payload)
     prepared = api.prepare_reveal(payload)
-    _assert_reveal_transaction_shape(prepared, payload)
+    if not isinstance(prepared, dict):
+        raise RuntimeError("Prepared reveal response is malformed.")
+    _assert_explicit_reveal_inputs(args, payload, prepared)
+    _assert_reveal_transaction_shape(prepared, payload, config)
     if maybe_json(args, prepared):
         return
     print(f"Bounty: {prepared['bountyCode']} ({prepared['bountyId']})")
@@ -1148,12 +1473,30 @@ def command_reveal(args: argparse.Namespace) -> None:
         return
     key = require_private_key(args)
     chain = make_chain(config)
-    for tx in prepared["transactions"]:
-        print(f"Sending {tx['label']}...")
-        receipt = chain.send_prepared_transaction(tx, key)
-        print(f"  tx {receipt['hash']} status={receipt['status']} gas={receipt['gasUsed']}")
-        if receipt["status"] != 1:
-            raise RuntimeError(f"{tx['label']} reverted.")
+    solver, onchain_commit_hash = chain.submission_identity(
+        str(config["bounty_manager"]),
+        prepared["bountyId"],
+        prepared["submissionId"],
+    )
+    _assert_private_key_matches_solver(key, solver)
+    expected_commit_hash = compute_solution_commit_hash(
+        chain_id=int(config["chain_id"]),
+        bounty_manager=str(config["bounty_manager"]),
+        bounty_id=prepared["bountyId"],
+        solver=solver,
+        solution_kind=int(payload["solutionKind"]),
+        proof_format=int(payload["proofFormat"]),
+        solution_digest=str(payload["solutionDigest"]),
+        salt=str(payload["salt"]),
+    )
+    if onchain_commit_hash.lower() != expected_commit_hash.lower():
+        raise RuntimeError("Reveal fields do not match the on-chain commitment.")
+    tx = prepared["transactions"][0]
+    print(f"Sending {tx['label']}...")
+    receipt = chain.send_prepared_transaction(tx, key)
+    print(f"  tx {receipt['hash']} status={receipt['status']} gas={receipt['gasUsed']}")
+    if receipt["status"] != 1:
+        raise RuntimeError(f"{tx['label']} reverted.")
     print("Reveal submitted.")
 
 
@@ -1221,27 +1564,6 @@ def command_buy_answer(args: argparse.Namespace) -> None:
 
     issuer_access = account.address.lower() == bounty["issuer"].lower()
     has_access = issuer_access or chain.can_access(controller, account.address, bounty_id)
-
-    is_legacy_access_controller = (
-        chain.chain_id == LEGACY_ACCESS_CONTROLLER_CHAIN_ID
-        and controller.lower() == LEGACY_ARTIFACT_ACCESS_CONTROLLER
-    )
-    if is_legacy_access_controller:
-        print(f"Bounty: {bounty_result['bountyCode']} ({bounty_id})")
-        print(f"Wallet: {account.address}")
-        if issuer_access:
-            print("Issuer access detected. No purchase required.")
-        elif has_access:
-            print("This wallet already has answer access. No purchase required.")
-        else:
-            raise RuntimeError(
-                "Paid answer purchases are disabled on the legacy Arbitrum Sepolia "
-                "AccessController until the protected quote/epoch contract migration is complete."
-            )
-        if args.download:
-            args.bounty = bounty_id
-            command_download_answer(args, query_file=query_file)
-        return
 
     quote_epoch, quote_status, price = chain.access_quote(controller, bounty_id, payment_token)
     _, solver, solver_amount, routed_amount = chain.access_distribution(controller, bounty_id, payment_token)
@@ -1450,7 +1772,7 @@ def build_parser() -> argparse.ArgumentParser:
     upload_solution.add_argument("--proof-format", default="drat", choices=["drat", "frat", "lrat", "DRAT", "FRAT", "LRAT"])
     upload_solution.add_argument(
         "--private-key",
-        help="Required for wallet-authenticated solution uploads; may also be set with 3SAT_PRIVATE_KEY.",
+        help="Required for wallet-authenticated solution uploads; may also be set with THREESAT_PRIVATE_KEY.",
     )
     upload_solution.add_argument("--json", action="store_true")
     upload_solution.set_defaults(func=command_upload_solution)
@@ -1483,8 +1805,8 @@ def build_parser() -> argparse.ArgumentParser:
     reveal.add_argument("--artifact-id", help="Opaque artifact id returned by upload-solution.")
     reveal.add_argument("--solution-digest")
     reveal.add_argument("--salt")
-    reveal.add_argument("--kind", default="sat", choices=["sat", "unsat", "SAT", "UNSAT"])
-    reveal.add_argument("--proof-format", default="drat", choices=["drat", "frat", "lrat", "DRAT", "FRAT", "LRAT"])
+    reveal.add_argument("--kind", choices=["sat", "unsat", "SAT", "UNSAT"])
+    reveal.add_argument("--proof-format", choices=["drat", "frat", "lrat", "DRAT", "FRAT", "LRAT"])
     reveal.add_argument("--send", action="store_true", help="Broadcast reveal transaction.")
     reveal.add_argument("--private-key")
     reveal.add_argument("--json", action="store_true")

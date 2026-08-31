@@ -37,13 +37,13 @@ Use a dedicated protocol wallet. Do not use your main wallet.
 The CLI does not store private keys by default. Pass a private key with `--private-key`, or set:
 
 ```bash
-export 3SAT_PRIVATE_KEY=0x...
+export THREESAT_PRIVATE_KEY=0x...
 ```
 
 On PowerShell:
 
 ```powershell
-$env:3SAT_PRIVATE_KEY="0x..."
+$env:THREESAT_PRIVATE_KEY="0x..."
 ```
 
 ## Quickstart
@@ -78,6 +78,10 @@ Create a bounty. The command accepts a DIMACS CNF instance up to 4 MiB, leaving 
 ```bash
 3sat issue problem.cnf --reward 100 --token USDC --send
 ```
+
+Before broadcasting, the CLI locally ABI-encodes the expected approval and bounty call, verifies the complete prepared transaction batch (`to`, `data`, and `value`), and signs only the locally reconstructed transactions. Commit and reveal broadcasts use the same fail-closed check.
+
+The CLI currently processes one CNF per `issue` invocation and one artifact per `upload-solution` invocation. It does not provide a built-in batch manifest, directory/glob input, or atomic batch upload/issue command.
 
 The default open, reveal, and verification windows are 1 hour each. Every window must be at least 1 hour. During the official-verifier launch phase, verifier quorum is fixed at 1; `--quorum` is retained for compatibility but rejects every value other than `1`.
 
@@ -148,7 +152,7 @@ Upload an UNSAT proof:
 3sat upload-solution unsat-proof.frat --kind unsat --proof-format frat --private-key 0x...
 ```
 
-UNSAT proof uploads are limited to 100 MiB. Every SAT assignment and UNSAT proof uses a wallet-authenticated, two-phase direct upload, so solution bytes do not pass through the Vercel request body and the server can bind the opaque artifact to its uploader. The CLI generates and signs an idempotent upload id/token binding before reserving, so a lost reservation response can be retried without consuming another slot. The private key may be supplied by `--private-key` or `3SAT_PRIVATE_KEY`.
+UNSAT proof uploads are limited to 100 MiB. Every SAT assignment and UNSAT proof uses a wallet-authenticated, two-phase direct upload, so solution bytes do not pass through the Vercel request body and the server can bind the opaque artifact to its uploader. The CLI generates and signs an idempotent upload id/token binding before reserving, so a lost reservation response can be retried without consuming another slot. The private key may be supplied by `--private-key` or `THREESAT_PRIVATE_KEY`.
 
 Successful solution uploads return an opaque `artifactId`, not an R2 object location. Keep the artifact id and digest for commit and reveal. The artifact id is used only by the API to bind the private upload to the solver; it is not placed on chain and is not included in the commitment hash.
 
@@ -175,13 +179,11 @@ Broadcast a commit:
   -o reveal.json
 ```
 
-Before preparing or sending a commit, the CLI verifies the bounty's snapshotted solver bond directly on chain and rebuilds the approval with that value. The legacy Arbitrum Sepolia BountyManager (`0x942b...C767`) predates bond snapshots, so only that exact contract on chain `421614` uses its on-chain token-level bond configuration for backward compatibility. New deployments never use this fallback, and a snapshot value of zero is rejected.
+Before preparing or sending a commit, the CLI verifies the bounty's snapshotted solver bond directly on chain and rebuilds the approval with that value. A snapshot value of zero is rejected.
 
 The commitment binds the chain id, BountyManager address, bounty id, solver, solution kind, proof format, solution digest, and salt. The opaque artifact id stays in the local reveal bundle so the API can recover and verify the private upload binding, but neither commit nor reveal stores it on chain.
 
 For `commit --send`, the CLI writes the reveal bundle atomically before broadcasting any approval or commit. Without `-o`, it uses `data/reveal-bundles/bounty-<id>-commit-<hash>.json`; if that write fails, nothing is broadcast. The bundle contains the secret salt required to reveal, so keep it durable and private and do not delete, share, sync, upload, or include it in a ZIP until the submission has been revealed.
-
-The legacy Arbitrum Sepolia AccessController (`0x6cBC...effB`) predates protected price quotes and manager epochs. The CLI preserves downloads for wallets that already have access, but deliberately disables new paid purchases on that exact legacy deployment. The current default deployment uses the protected AccessController flow.
 
 Reveal after commit. Use the submission id assigned by the commit transaction:
 
@@ -199,15 +201,17 @@ The config file is stored at:
 
 Supported environment variable overrides:
 
-- `3SAT_API_URL`
-- `3SAT_RPC_URL`
-- `3SAT_CHAIN_ID`
-- `3SAT_CHAIN_NAME`
-- `3SAT_BOUNTY_MANAGER_ADDRESS`
-- `3SAT_ARTIFACT_ACCESS_CONTROLLER_ADDRESS`
-- `3SAT_USDC_ADDRESS`
-- `3SAT_TOKEN_ADDRESS`
-- `3SAT_PRIVATE_KEY`
+- `THREESAT_CONFIG`
+- `THREESAT_CONFIG_DIR`
+- `THREESAT_API_URL`
+- `THREESAT_RPC_URL`
+- `THREESAT_CHAIN_ID`
+- `THREESAT_CHAIN_NAME`
+- `THREESAT_BOUNTY_MANAGER_ADDRESS`
+- `THREESAT_ARTIFACT_ACCESS_CONTROLLER_ADDRESS`
+- `THREESAT_USDC_ADDRESS`
+- `THREESAT_TOKEN_ADDRESS`
+- `THREESAT_PRIVATE_KEY`
 
 ## Notes
 

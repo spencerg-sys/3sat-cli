@@ -14,10 +14,6 @@ ACCESS_STATUS_PUBLIC = 1
 ACCESS_STATUS_PRICED = 2
 ACCESS_STATUS_DISABLED = 3
 ACCESS_PURCHASE_DEADLINE_SECONDS = 30 * 60
-LEGACY_SOLVER_BOND_CHAIN_ID = 421614
-LEGACY_SOLVER_BOND_BOUNTY_MANAGER = "0x942b326b190d588fe1bb3931502f509c9f9ec767"
-LEGACY_ACCESS_CONTROLLER_CHAIN_ID = 421614
-LEGACY_ARTIFACT_ACCESS_CONTROLLER = "0x6cbcbddcbe1c4c51237526c152650a4cb4f5effb"
 
 
 ERC20_ABI = [
@@ -122,6 +118,25 @@ ARTIFACT_ACCESS_ABI = [
 BOUNTY_MANAGER_ABI = [
     {
         "type": "function",
+        "name": "createBounty",
+        "stateMutability": "nonpayable",
+        "inputs": [
+            {"name": "paymentToken", "type": "address"},
+            {"name": "instanceCID", "type": "string"},
+            {"name": "instanceDigest", "type": "bytes32"},
+            {"name": "metadataURI", "type": "string"},
+            {"name": "metadataDigest", "type": "bytes32"},
+            {"name": "reward", "type": "uint256"},
+            {"name": "postingFee", "type": "uint256"},
+            {"name": "commitWindow", "type": "uint64"},
+            {"name": "revealWindow", "type": "uint64"},
+            {"name": "verificationWindow", "type": "uint64"},
+            {"name": "verifierQuorum", "type": "uint16"},
+        ],
+        "outputs": [{"name": "bountyId", "type": "uint256"}],
+    },
+    {
+        "type": "function",
         "name": "commitSolution",
         "stateMutability": "nonpayable",
         "inputs": [
@@ -202,6 +217,37 @@ BOUNTY_MANAGER_ABI = [
         ],
     },
     {
+        "type": "function",
+        "name": "getBounty",
+        "stateMutability": "view",
+        "inputs": [{"name": "bountyId", "type": "uint256"}],
+        "outputs": [
+            {
+                "name": "",
+                "type": "tuple",
+                "components": [
+                    {"name": "issuer", "type": "address"},
+                    {"name": "paymentToken", "type": "address"},
+                    {"name": "instanceCID", "type": "string"},
+                    {"name": "instanceDigest", "type": "bytes32"},
+                    {"name": "metadataURI", "type": "string"},
+                    {"name": "metadataDigest", "type": "bytes32"},
+                    {"name": "reward", "type": "uint256"},
+                    {"name": "verifierRewardPool", "type": "uint256"},
+                    {"name": "postingFee", "type": "uint256"},
+                    {"name": "commitDeadline", "type": "uint64"},
+                    {"name": "revealDeadline", "type": "uint64"},
+                    {"name": "verificationDeadline", "type": "uint64"},
+                    {"name": "verifierQuorum", "type": "uint16"},
+                    {"name": "submissionCount", "type": "uint256"},
+                    {"name": "acceptedCandidateCount", "type": "uint256"},
+                    {"name": "finalized", "type": "bool"},
+                    {"name": "postingFeeRouted", "type": "bool"},
+                ],
+            }
+        ],
+    },
+    {
         "type": "event",
         "name": "SolutionRevealed",
         "anonymous": False,
@@ -243,6 +289,87 @@ BOUNTY_MANAGER_ABI = [
         "outputs": [{"name": "bondAmount", "type": "uint256"}],
     },
 ]
+
+
+def _encode_contract_call(abi: list[dict[str, Any]], function_name: str, args: list[Any]) -> str:
+    contract = Web3().eth.contract(abi=abi)
+    encode_abi = getattr(contract, "encode_abi", None)
+    if callable(encode_abi):
+        return str(encode_abi(function_name, args=args))
+    # web3.py 6.x used the camelCase spelling; it was renamed in 7.x.
+    return str(contract.encodeABI(fn_name=function_name, args=args))
+
+
+def encode_approval_data(spender: str, amount: int) -> str:
+    return _encode_contract_call(
+        ERC20_ABI,
+        "approve",
+        [Web3.to_checksum_address(spender), int(amount)],
+    )
+
+
+def encode_create_bounty_data(
+    *,
+    payment_token: str,
+    instance_ref: str,
+    instance_digest: str,
+    metadata_ref: str,
+    metadata_digest: str,
+    reward: int,
+    posting_fee: int,
+    commit_window: int,
+    reveal_window: int,
+    verification_window: int,
+    verifier_quorum: int,
+) -> str:
+    return _encode_contract_call(
+        BOUNTY_MANAGER_ABI,
+        "createBounty",
+        [
+            Web3.to_checksum_address(payment_token),
+            str(instance_ref),
+            instance_digest,
+            str(metadata_ref),
+            metadata_digest,
+            int(reward),
+            int(posting_fee),
+            int(commit_window),
+            int(reveal_window),
+            int(verification_window),
+            int(verifier_quorum),
+        ],
+    )
+
+
+def encode_commit_solution_data(bounty_id: int | str, commit_hash: str) -> str:
+    return _encode_contract_call(
+        BOUNTY_MANAGER_ABI,
+        "commitSolution",
+        [int(bounty_id), commit_hash],
+    )
+
+
+def encode_reveal_solution_data(
+    *,
+    bounty_id: int | str,
+    submission_id: int | str,
+    solution_kind: int,
+    proof_format: int,
+    solution_digest: str,
+    salt: str,
+) -> str:
+    return _encode_contract_call(
+        BOUNTY_MANAGER_ABI,
+        "revealSolution",
+        [
+            int(bounty_id),
+            int(submission_id),
+            int(solution_kind),
+            int(proof_format),
+            solution_digest,
+            salt,
+        ],
+    )
 
 
 def compute_solution_commit_hash(
@@ -387,11 +514,23 @@ class ChainClient:
             .call()
         )
 
+    def bounty_payment_token(self, bounty_manager: str, bounty_id: str | int) -> str:
+        bounty = self.bounty_manager_contract(bounty_manager).functions.getBounty(int(bounty_id)).call()
+        return str(bounty[1])
+
+    def submission_identity(
+        self,
+        bounty_manager: str,
+        bounty_id: str | int,
+        submission_id: str | int,
+    ) -> tuple[str, str]:
+        contract = self.bounty_manager_contract(bounty_manager)
+        submission = contract.functions.getSubmission(int(bounty_id), int(submission_id)).call()
+        return str(submission[0]), Web3.to_hex(submission[1])
+
     def approval_data(self, token: str, spender: str, amount: int) -> str:
-        return self.token_contract(token).functions.approve(
-            self.w3.to_checksum_address(spender),
-            int(amount),
-        )._encode_transaction_data()
+        _ = self.w3.to_checksum_address(token)
+        return encode_approval_data(spender, amount)
 
     def send_prepared_transaction(self, tx: dict[str, Any], private_key: str) -> dict[str, Any]:
         return self.send_transaction(

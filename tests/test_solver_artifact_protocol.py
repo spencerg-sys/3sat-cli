@@ -10,11 +10,14 @@ from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import Mock, patch
 
+from eth_account import Account
+
 from threesat_cli.chain import BOUNTY_MANAGER_ABI, compute_solution_commit_hash
 from threesat_cli.main import (
     _commit_solution_data,
     _default_reveal_bundle_path,
     _prepare_commit_payload,
+    _reveal_solution_data,
     _validated_solution_artifact,
     build_parser,
     command_commit,
@@ -26,7 +29,8 @@ from threesat_cli.main import (
 ARTIFACT_ID = "artifact-" + "ab" * 24
 DIGEST = "0x" + "22" * 32
 SALT = "0x" + "33" * 32
-SOLVER = "0x1111111111111111111111111111111111111111"
+TEST_PRIVATE_KEY = "0x" + "11" * 32
+SOLVER = Account.from_key(TEST_PRIVATE_KEY).address
 
 
 def abi_item(name: str, item_type: str = "function") -> dict:
@@ -205,7 +209,7 @@ class SolverArtifactProtocolTests(unittest.TestCase):
                 "--solution-digest",
                 DIGEST,
                 "--private-key",
-                "0x" + "44" * 32,
+                TEST_PRIVATE_KEY,
                 "--send",
             ]
         )
@@ -258,7 +262,7 @@ class SolverArtifactProtocolTests(unittest.TestCase):
                 "--solution-digest",
                 DIGEST,
                 "--private-key",
-                "0x" + "44" * 32,
+                TEST_PRIVATE_KEY,
                 "--send",
             ]
         )
@@ -303,7 +307,7 @@ class SolverArtifactProtocolTests(unittest.TestCase):
                 "--solution-digest",
                 DIGEST,
                 "--private-key",
-                "0x" + "44" * 32,
+                TEST_PRIVATE_KEY,
                 "--send",
             ]
         )
@@ -367,7 +371,7 @@ class SolverArtifactProtocolTests(unittest.TestCase):
                         "--solution-digest",
                         DIGEST,
                         "--private-key",
-                        "0x" + "11" * 32,
+                        TEST_PRIVATE_KEY,
                         "--send",
                     ]
                 )
@@ -420,7 +424,7 @@ class SolverArtifactProtocolTests(unittest.TestCase):
                         "--solution-digest",
                         DIGEST,
                         "--private-key",
-                        "0x" + "11" * 32,
+                        TEST_PRIVATE_KEY,
                         "--send",
                     ]
                 )
@@ -449,22 +453,30 @@ class SolverArtifactProtocolTests(unittest.TestCase):
                 solution_digest=DIGEST,
                 salt=SALT,
             ),
-            "0x5b071490eb66e47ffa263d2658481986253ce6f3fb11e79908e7dba50d52aeef",
+            "0x14b8fea1b9a6b23228f1bc1ef2a6dc7a78e068d92f9517c64bda228dd1b9630b",
         )
 
     def test_reveal_sends_artifact_id_to_the_api_but_not_to_the_transaction(self) -> None:
+        manager = "0x2222222222222222222222222222222222222222"
         prepared = {
+            "chainId": 421614,
+            "bountyManager": manager,
             "bountyId": "7",
             "bountyCode": "SAT-TEST",
             "submissionId": "1",
+            "artifactId": ARTIFACT_ID,
+            "solutionKind": 1,
             "solutionKindCode": "SAT",
+            "proofFormat": 0,
             "proofFormatName": "None",
             "transactions": [
                 {
                     "label": "Reveal solution",
-                    "to": "0x2222222222222222222222222222222222222222",
+                    "to": manager,
                     "functionName": "revealSolution",
                     "args": ["7", "1", 1, 0, DIGEST, SALT],
+                    "data": _reveal_solution_data("7", "1", 1, 0, DIGEST, SALT),
+                    "value": "0",
                 }
             ],
         }
@@ -484,7 +496,10 @@ class SolverArtifactProtocolTests(unittest.TestCase):
             json=False,
         )
         with (
-            patch("threesat_cli.main.load_config", return_value={}),
+            patch(
+                "threesat_cli.main.load_config",
+                return_value={"chain_id": 421614, "bounty_manager": manager},
+            ),
             patch("threesat_cli.main.make_api", return_value=api),
             redirect_stdout(io.StringIO()),
         ):
