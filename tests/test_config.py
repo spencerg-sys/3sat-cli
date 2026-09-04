@@ -10,6 +10,27 @@ from threesat_cli import config as config_module
 
 
 class ConfigEnvironmentTests(unittest.TestCase):
+    def test_defaults_target_arbitrum_one_production_deployment(self) -> None:
+        self.assertEqual(config_module.DEFAULT_CONFIG["rpc_url"], "https://arb1.arbitrum.io/rpc")
+        self.assertEqual(config_module.DEFAULT_CONFIG["chain_id"], 42161)
+        self.assertEqual(config_module.DEFAULT_CONFIG["chain_name"], "Arbitrum One")
+        self.assertEqual(
+            config_module.DEFAULT_CONFIG["bounty_manager"],
+            "0xD31897B472156CC31Dc64d0fa45e43bF7B8C02ED",
+        )
+        self.assertEqual(
+            config_module.DEFAULT_CONFIG["artifact_access_controller"],
+            "0xf875fDaBbC191801f8C8fD7fde968556Ca2D760f",
+        )
+        self.assertEqual(
+            config_module.DEFAULT_CONFIG["tokens"]["USDC"]["address"],
+            "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
+        )
+        self.assertEqual(
+            config_module.DEFAULT_CONFIG["tokens"]["3SAT"]["address"],
+            "0x2C1B789B001F51F65a9fa61C4501B0E9Fc0Ab92c",
+        )
+
     def test_threesat_environment_overrides_are_applied(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             missing_config = Path(temp_dir) / "missing.json"

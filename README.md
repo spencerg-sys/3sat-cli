@@ -60,6 +60,8 @@ Initialize the default public deployment configuration:
 3sat config init
 ```
 
+The bundled defaults target the production deployment on Arbitrum One (chain ID `42161`). Existing `~/.3sat/config.json` files are not overwritten by source-default changes; preserve intentional custom values, then replace every public deployment field with `3sat config set` before connecting to production.
+
 Search for an existing answer:
 
 ```bash

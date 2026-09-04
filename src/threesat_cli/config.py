@@ -12,22 +12,22 @@ CONFIG_PATH = Path(os.environ.get("THREESAT_CONFIG", CONFIG_DIR / "config.json")
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "api_url": "https://3sat.network",
-    "rpc_url": "https://sepolia-rollup.arbitrum.io/rpc",
-    "chain_id": 421614,
-    "chain_name": "Arbitrum Sepolia",
-    "bounty_manager": "0x4158B40E1Aa41Cd386b7936B1023Fe094f77Fed1",
-    "artifact_access_controller": "0x93c055B36fD94177644447ed96B76A805baaFA27",
-    "usdc": "0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d",
-    "sat_token": "0xa86B949636480d6DEf03677965FfC45b121174fb",
+    "rpc_url": "https://arb1.arbitrum.io/rpc",
+    "chain_id": 42161,
+    "chain_name": "Arbitrum One",
+    "bounty_manager": "0xD31897B472156CC31Dc64d0fa45e43bF7B8C02ED",
+    "artifact_access_controller": "0xf875fDaBbC191801f8C8fD7fde968556Ca2D760f",
+    "usdc": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
+    "sat_token": "0x2C1B789B001F51F65a9fa61C4501B0E9Fc0Ab92c",
     "tokens": {
         "USDC": {
             "symbol": "USDC",
-            "address": "0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d",
+            "address": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
             "decimals": 6,
         },
         "3SAT": {
             "symbol": "$3SAT",
-            "address": "0xa86B949636480d6DEf03677965FfC45b121174fb",
+            "address": "0x2C1B789B001F51F65a9fa61C4501B0E9Fc0Ab92c",
             "decimals": 18,
         },
     },

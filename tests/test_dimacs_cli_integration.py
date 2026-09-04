@@ -27,7 +27,7 @@ from threesat_cli.main import (
 def protocol_config() -> dict:
     return {
         "api_url": "https://example.test",
-        "chain_id": 421614,
+        "chain_id": 31337,
         "bounty_manager": "0x2222222222222222222222222222222222222222",
         "tokens": {
             "USDC": {

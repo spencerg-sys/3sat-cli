@@ -210,8 +210,8 @@ class MatchedAnswerTests(unittest.TestCase):
                 patch(
                     "threesat_cli.main.load_config",
                     return_value={
-                        "chain_id": 421614,
-                        "bounty_manager": "0x4158b40e1aa41cd386b7936b1023fe094f77fed1",
+                        "chain_id": 31337,
+                        "bounty_manager": "0x7777777777777777777777777777777777777777",
                     },
                 ),
                 patch("threesat_cli.main.make_api", return_value=api),

@@ -45,7 +45,7 @@ class SolverArtifactProtocolTests(unittest.TestCase):
     @staticmethod
     def _prepared_commit(manager: str) -> dict:
         commit_hash = compute_solution_commit_hash(
-            chain_id=421614,
+            chain_id=31337,
             bounty_manager=manager,
             bounty_id=7,
             solver=SOLVER,
@@ -64,7 +64,7 @@ class SolverArtifactProtocolTests(unittest.TestCase):
             "commitHash": commit_hash,
         }
         return {
-            "chainId": 421614,
+            "chainId": 31337,
             "artifactId": ARTIFACT_ID,
             "bountyManager": manager,
             "bountyId": "7",
@@ -177,7 +177,7 @@ class SolverArtifactProtocolTests(unittest.TestCase):
             with (
                 patch(
                     "threesat_cli.main.load_config",
-                    return_value={"chain_id": 421614, "bounty_manager": manager},
+                    return_value={"chain_id": 31337, "bounty_manager": manager},
                 ),
                 patch("threesat_cli.main.make_api", return_value=api),
                 patch("threesat_cli.main._synchronize_commit_bond"),
@@ -230,7 +230,7 @@ class SolverArtifactProtocolTests(unittest.TestCase):
             with (
                 patch(
                     "threesat_cli.main.load_config",
-                    return_value={"chain_id": 421614, "bounty_manager": manager},
+                    return_value={"chain_id": 31337, "bounty_manager": manager},
                 ),
                 patch("threesat_cli.main.make_api", return_value=api),
                 patch("threesat_cli.main._synchronize_commit_bond", return_value=chain),
@@ -279,7 +279,7 @@ class SolverArtifactProtocolTests(unittest.TestCase):
             with (
                 patch(
                     "threesat_cli.main.load_config",
-                    return_value={"chain_id": 421614, "bounty_manager": manager},
+                    return_value={"chain_id": 31337, "bounty_manager": manager},
                 ),
                 patch("threesat_cli.main.make_api", return_value=api),
                 patch("threesat_cli.main._synchronize_commit_bond", return_value=chain),
@@ -315,7 +315,7 @@ class SolverArtifactProtocolTests(unittest.TestCase):
         with (
             patch(
                 "threesat_cli.main.load_config",
-                return_value={"chain_id": 421614, "bounty_manager": manager},
+                return_value={"chain_id": 31337, "bounty_manager": manager},
             ),
             patch("threesat_cli.main.make_api", return_value=api),
             patch("threesat_cli.main._synchronize_commit_bond", return_value=chain),
@@ -378,7 +378,7 @@ class SolverArtifactProtocolTests(unittest.TestCase):
                 with (
                     patch(
                         "threesat_cli.main.load_config",
-                        return_value={"chain_id": 421614, "bounty_manager": manager},
+                        return_value={"chain_id": 31337, "bounty_manager": manager},
                     ),
                     patch("threesat_cli.main.make_api", return_value=api),
                     patch("threesat_cli.main._synchronize_commit_bond", return_value=chain),
@@ -431,7 +431,7 @@ class SolverArtifactProtocolTests(unittest.TestCase):
                 with (
                     patch(
                         "threesat_cli.main.load_config",
-                        return_value={"chain_id": 421614, "bounty_manager": manager},
+                        return_value={"chain_id": 31337, "bounty_manager": manager},
                     ),
                     patch("threesat_cli.main.make_api", return_value=api),
                     patch("threesat_cli.main._synchronize_commit_bond", return_value=chain),
@@ -444,7 +444,7 @@ class SolverArtifactProtocolTests(unittest.TestCase):
     def test_commit_hash_matches_the_protocol_fixed_vector(self) -> None:
         self.assertEqual(
             compute_solution_commit_hash(
-                chain_id=421614,
+                chain_id=31337,
                 bounty_manager="0x4444444444444444444444444444444444444444",
                 bounty_id=42,
                 solver=SOLVER,
@@ -453,13 +453,13 @@ class SolverArtifactProtocolTests(unittest.TestCase):
                 solution_digest=DIGEST,
                 salt=SALT,
             ),
-            "0x14b8fea1b9a6b23228f1bc1ef2a6dc7a78e068d92f9517c64bda228dd1b9630b",
+            "0x044e7ecca17b1e015e2e4f87ca61b85876dadd3a3fcdbd1796010720d9e61172",
         )
 
     def test_reveal_sends_artifact_id_to_the_api_but_not_to_the_transaction(self) -> None:
         manager = "0x2222222222222222222222222222222222222222"
         prepared = {
-            "chainId": 421614,
+            "chainId": 31337,
             "bountyManager": manager,
             "bountyId": "7",
             "bountyCode": "SAT-TEST",
@@ -498,7 +498,7 @@ class SolverArtifactProtocolTests(unittest.TestCase):
         with (
             patch(
                 "threesat_cli.main.load_config",
-                return_value={"chain_id": 421614, "bounty_manager": manager},
+                return_value={"chain_id": 31337, "bounty_manager": manager},
             ),
             patch("threesat_cli.main.make_api", return_value=api),
             redirect_stdout(io.StringIO()),

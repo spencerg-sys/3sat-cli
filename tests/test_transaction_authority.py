@@ -49,7 +49,7 @@ def protocol_config() -> dict:
     return {
         "api_url": "https://example.test",
         "rpc_url": "https://rpc.example.test",
-        "chain_id": 421614,
+        "chain_id": 31337,
         "bounty_manager": MANAGER,
         "tokens": {
             "USDC": {
@@ -156,7 +156,7 @@ class TransactionAuthorityTests(unittest.TestCase):
     @staticmethod
     def _prepared_reveal() -> dict:
         return {
-            "chainId": 421614,
+            "chainId": 31337,
             "bountyManager": MANAGER,
             "bountyId": "7",
             "bountyCode": _display_bounty_code(7),
@@ -230,7 +230,7 @@ class TransactionAuthorityTests(unittest.TestCase):
         api = Mock()
         api.prepare_reveal.return_value = prepared
         commit_hash = compute_solution_commit_hash(
-            chain_id=421614,
+            chain_id=31337,
             bounty_manager=MANAGER,
             bounty_id=7,
             solver=SOLVER,
@@ -383,7 +383,7 @@ class TransactionAuthorityTests(unittest.TestCase):
     def test_commit_rejects_an_api_swapped_explicit_salt(self) -> None:
         replacement_salt = "0x" + "55" * 32
         prepared = {
-            "chainId": 421614,
+            "chainId": 31337,
             "bountyManager": MANAGER,
             "bountyId": "7",
             "solver": SOLVER,
@@ -393,7 +393,7 @@ class TransactionAuthorityTests(unittest.TestCase):
             "solutionDigest": SOLUTION_DIGEST,
             "salt": replacement_salt,
             "commitHash": compute_solution_commit_hash(
-                chain_id=421614,
+                chain_id=31337,
                 bounty_manager=MANAGER,
                 bounty_id=7,
                 solver=SOLVER,
